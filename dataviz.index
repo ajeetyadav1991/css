@@ -80,7 +80,7 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
 .sb-search:focus { border-color: var(--forest-mid); }
 .sb-search::placeholder { color: var(--faint); }
 .sb-pills { overflow-y: auto; padding: 6px 10px 12px; }
-.fp { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border-radius: 5px; margin-bottom: 2px; cursor: grab; user-select: none; transition: all .13s; border: 1.5px solid transparent; font-size: 11.5px; }
+.fp { display: flex; align-items: center; gap: 7px; padding: 6px 9px; border-radius: 5px; margin-bottom: 2px; cursor: grab; user-select: none; -webkit-user-select: none; touch-action: none; -webkit-user-drag: element; transition: all .13s; border: 1.5px solid transparent; font-size: 11.5px; }
 .fp.dim { background: var(--forest-lt); color: var(--forest); border-color: var(--forest-mid); }
 .fp.mea { background: var(--amber-lt); color: var(--amber); border-color: var(--amber-mid); }
 .fp:hover { filter: brightness(.96); transform: translateX(2px); box-shadow: var(--shadow-sm); }
@@ -110,6 +110,18 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
 .chip.dim { background: var(--forest-lt); border-color: var(--forest-mid); color: var(--forest); }
 .chip.mea { background: var(--amber-lt); border-color: var(--amber-mid); color: var(--amber); }
 .chip:hover { box-shadow: var(--shadow-sm); }
+.chip-drag-over { outline: 2px solid var(--sky); outline-offset: 1px; }
+.chip-drop-before { border-left: 3px solid var(--sky) !important; margin-left: 4px; }
+.chip-drop-after  { border-right: 3px solid var(--sky) !important; margin-right: 4px; }
+.shelf-drop.chip-over { border-color: var(--sky); background: var(--sky-lt); border-style: solid; }
+.drop-ghost {
+  display: inline-flex; align-items: center;
+  padding: 4px 10px; border-radius: 4px;
+  border: 2px dashed var(--sky); color: var(--sky);
+  font-size: 11px; font-weight: 600; background: var(--sky-lt);
+  animation: chipIn .12s ease; pointer-events: none;
+  white-space: nowrap;
+}
 .chip .agg-sel { background: transparent; border: none; color: inherit; font-family: var(--mono); font-size: 10px; cursor: pointer; padding: 0 2px; font-weight: 600; }
 .chip .rm { background: none; border: none; color: inherit; opacity: .45; cursor: pointer; font-size: 13px; line-height: 1; padding: 0; transition: opacity .1s; }
 .chip .rm:hover { opacity: 1; }
@@ -320,21 +332,21 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
       <div class="shelf-row">
         <div class="shelf-lbl">Columns</div>
         <div class="shelf-drop" id="shelf-columns"
-          ondragover="onDragOver(event,'cols')" ondragleave="onDragLeave(event)" ondrop="onDrop(event,'columns')">
+          ondragover="onShelfDragOver(event,'cols','columns')" ondragleave="onDragLeave(event)" ondrop="onDrop(event,'columns')">
           <span class="shelf-ph">Drop dimensions here</span>
         </div>
       </div>
       <div class="shelf-row">
         <div class="shelf-lbl">Rows</div>
         <div class="shelf-drop" id="shelf-rows"
-          ondragover="onDragOver(event,'rows')" ondragleave="onDragLeave(event)" ondrop="onDrop(event,'rows')">
+          ondragover="onShelfDragOver(event,'rows','rows')" ondragleave="onDragLeave(event)" ondrop="onDrop(event,'rows')">
           <span class="shelf-ph">Drop dimensions or measures here</span>
         </div>
       </div>
       <div class="shelf-row">
         <div class="shelf-lbl">Filters</div>
         <div class="shelf-drop" id="shelf-filters"
-          ondragover="onDragOver(event,'filt')" ondragleave="onDragLeave(event)" ondrop="onDrop(event,'filters')">
+          ondragover="onShelfDragOver(event,'filt','filters')" ondragleave="onDragLeave(event)" ondrop="onDrop(event,'filters')">
           <span class="shelf-ph">Drop any field to filter — click chip to configure</span>
         </div>
       </div>
@@ -387,6 +399,7 @@ const WW = `
     else if (type === 'GET_VALUES')  getValues(payload);
     else if (type === 'QUERY')       query(payload);
     else if (type === 'RENAME_COL')  { const v=cols[payload.from]; if(v){cols[payload.to]=v; delete cols[payload.from];} }
+    else if (type === 'DATE_PART')   { createDatePart(payload); }
   };
 
   function loadCols({ columns, sch, count }) {
@@ -429,7 +442,17 @@ const WW = `
         }
         cols[h] = fa; schema.push({ name:h, type:'measure' });
       } else {
-        cols[h] = arr; schema.push({ name:h, type:'dimension' });
+        // Date detection — sample up to 20 values
+        const dateSamp = arr.slice(0,20).filter(v=>v&&v!=='');
+        const dateHits = dateSamp.filter(v=>{
+          const d = new Date(v);
+          return !isNaN(d.getTime()) && String(v).length >= 6;
+        }).length;
+        if (dateHits > dateSamp.length * 0.7) {
+          cols[h] = arr; schema.push({ name:h, type:'dimension', dataType:'date' });
+        } else {
+          cols[h] = arr; schema.push({ name:h, type:'dimension' });
+        }
       }
     });
     rowCount = tmp[headers[0]].length;
@@ -448,6 +471,28 @@ const WW = `
       cur += c;
     }
     res.push(cur.trim()); return res;
+  }
+
+  function createDatePart({field, part, newName}) {
+    const src = cols[field]; if (!src) return;
+    const out = new Array(rowCount);
+    for (let i=0;i<rowCount;i++) {
+      const d = new Date(src[i]);
+      if (isNaN(d.getTime())) { out[i]=''; continue; }
+      switch(part) {
+        case 'year':    out[i] = String(d.getFullYear()); break;
+        case 'quarter': out[i] = 'Q'+(Math.floor(d.getMonth()/3)+1)+' '+d.getFullYear(); break;
+        case 'month':   out[i] = d.toLocaleString('default',{month:'short'})+' '+d.getFullYear(); break;
+        case 'week':    
+          const jan1 = new Date(d.getFullYear(),0,1);
+          const wk = Math.ceil(((d-jan1)/86400000+jan1.getDay()+1)/7);
+          out[i] = 'W'+String(wk).padStart(2,'0')+' '+d.getFullYear(); break;
+        case 'day':     out[i] = d.toISOString().slice(0,10); break;
+        default:        out[i] = String(src[i]);
+      }
+    }
+    cols[newName] = out;
+    schema.push({name:newName, type:'dimension', dataType:'datepart'});
   }
 
   function getValues({ field, type, reqId }) {
@@ -531,9 +576,10 @@ const WW = `
         const e = { _d: new Array(dLen), _a: new Float64Array(mLen), _c: new Int32Array(mLen).fill(1) };
         for (let d = 0; d < dLen; d++) e._d[d] = cols[dims[d].field] ? cols[dims[d].field][i] : '';
         for (let m = 0; m < mLen; m++) {
-          const c = cols[meas[m].field], ag = meas[m].agg;
-          const v = c ? (parseFloat(c[i]) || 0) : 0;
-          e._a[m] = (ag === 'COUNT' || ag === 'COUNTD') ? 1 : v;
+          const ag = meas[m].agg;
+          const c = cols[meas[m].field];
+          const v = (meas[m].field==='Record Count') ? 1 : (c ? (parseFloat(c[i])||0) : 0);
+          e._a[m] = (ag==='COUNT'||ag==='COUNTD') ? 1 : v;
         }
         gmap.set(key, e);
         // Init COUNTD sets for this new group
@@ -552,7 +598,7 @@ const WW = `
         const sets = hasCd ? cdSets.get(key) : null;
         for (let m = 0; m < mLen; m++) {
           const ag = meas[m].agg, c = cols[meas[m].field];
-          const v = c ? (parseFloat(c[i]) || 0) : 0;
+          const v = (meas[m].field==='Record Count') ? 1 : (c ? (parseFloat(c[i])||0) : 0);
           if      (ag === 'SUM' || ag === 'AVG') { e._a[m] += v; e._c[m]++; }
           else if (ag === 'COUNT')  { e._a[m]++; }
           else if (ag === 'COUNTD') { sets[m].add(c ? c[i] : null); e._a[m] = sets[m].size; }
@@ -572,6 +618,19 @@ const WW = `
       rows.push(row);
     });
     if (dLen>0) rows.sort((a,b)=>String(a[dims[0].field]||'').localeCompare(String(b[dims[0].field]||'')));
+
+    // Apply Top N filters
+    (filters||[]).forEach(f => {
+      if (!f.topN || !f.topNBy) return;
+      const measKey = Object.keys(rows[0]||{}).find(k=>k.includes('('+f.topNBy+')')) || f.topNBy;
+      rows.sort((a,b) => (b[measKey]||0) - (a[measKey]||0));
+      const topVals = new Set(rows.slice(0, f.topN).map(r=>String(r[f.field]||'')));
+      const keep = f.topNDir==='top' ? topVals : new Set(rows.slice(-f.topN).map(r=>String(r[f.field]||'')));
+      for (let i=rows.length-1;i>=0;i--) {
+        if (!keep.has(String(rows[i][f.field]||''))) rows.splice(i,1);
+      }
+      if (dLen>0) rows.sort((a,b)=>String(a[dims[0].field]||'').localeCompare(String(b[dims[0].field]||'')));
+    });
     const limited = rows.slice(0, limit||50000);
     const headers = [...dims.map(d=>d.field),...meas.map(m=>m.agg+'('+m.field+')')];
     self.postMessage({ type:'RESULT', payload:{ headers, rows:limited, total:rows.length, skipped } });
@@ -593,7 +652,7 @@ const S = {
 const filterState = {}; // keyed by field name
 let valueCallbacks = {}; // reqId → callback
 let reqCounter = 0;
-let chart = null, dragF = null;
+let chart = null, dragF = null, chipDrag = null;
 let openPopoverField = null;
 
 /* ════════════════════════════════════════════
@@ -606,6 +665,10 @@ worker.onmessage = ({ data: { type, payload } }) => {
   } else if (type === 'DONE') {
     hideProgress();
     S.schema = payload.schema; S.rowCount = payload.rowCount;
+    // Always inject Record Count as first measure
+    if (!S.schema.find(s=>s.name==='Record Count')) {
+      S.schema.push({ name:'Record Count', type:'measure', defaultAgg:'COUNT', _virtual:true });
+    }
     buildSidebar();
     setStatus(`${S.filename}  ·  ${fmtN(payload.rowCount)} rows  ·  ${payload.schema.length} columns`);
     const b = document.getElementById('row-badge');
@@ -618,8 +681,11 @@ worker.onmessage = ({ data: { type, payload } }) => {
     const cb = valueCallbacks[payload.reqId];
     if (cb) { cb(payload); delete valueCallbacks[payload.reqId]; }
   } else if (type === 'RESULT') {
+    _queryActive = false;
+    clearTimeout(_queryTimer);
+    document.getElementById('query-overlay').style.display='none';
     S.result = payload;
-    S.skipped = payload.skipped || [];
+    S.result._shelf = S._pendingShelf;
     render();
   }
 };
@@ -690,7 +756,11 @@ function readXLSX(file) {
           colsOut[h]=Array.from(new Float64Array(arr.map(v=>parseFloat(v)||0)));
           sch.push({name:h,type:'measure'});
         } else {
-          colsOut[h]=arr.map(v=>String(v)); sch.push({name:h,type:'dimension'});
+          const dateSamp = arr.slice(0,20).filter(v=>v&&v!=='');
+          const dateHits = dateSamp.filter(v=>{ const d=new Date(v); return !isNaN(d.getTime())&&String(v).length>=6; }).length;
+          const isDate = dateHits > dateSamp.length * 0.7;
+          colsOut[h]=arr.map(v=>String(v));
+          sch.push({name:h, type:'dimension', dataType: isDate?'date':'string'});
         }
       });
       setProgress(88,'Loading engine…');
@@ -809,7 +879,21 @@ function openCtxMenu(e, field, currentType) {
     </div>`;
   }
 
+  // ── Date hierarchy (only for date fields) ──
+  if (s.dataType === 'date') {
+    html += `<div class="ctx-item">
+      <span>📅 Add Date Part</span><span class="ctx-arrow">▶</span>
+      <div class="ctx-sub">
+        ${[['year','Year'],['quarter','Quarter'],['month','Month'],['week','Week'],['day','Day']].map(([p,l])=>`
+          <div class="ctx-item" onclick="addDatePart('${esc(field)}','${p}');closeCtxMenu()">
+            <span>${l}</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }
   html += `<div class="ctx-sep"></div>`;
+
+  // ── Rename ──
 
   // ── Rename ──
   html += `<div class="ctx-item" onclick="renameField('${esc(field)}');closeCtxMenu()">
@@ -901,6 +985,19 @@ function setNumFormat(field, fmt) {
   if (S.result) render();
 }
 
+function addDatePart(field, part) {
+  const newName = `${part}(${field})`;
+  if (S.schema.find(s=>s.name===newName)) {
+    setStatus(`"${newName}" already exists in sidebar`); return;
+  }
+  // Tell worker to create derived column
+  worker.postMessage({type:'DATE_PART', payload:{field, part, newName}});
+  // Optimistically add to schema
+  S.schema.push({name:newName, type:'dimension', dataType:'datepart', _derived:true, _sourceField:field, _part:part});
+  buildSidebar();
+  setStatus(`Added date part: ${newName}`);
+}
+
 function applyNumFormat(val, field) {
   const s = S.schema.find(x=>x.name===field);
   const fmt = s?.numFormat || 'default';
@@ -926,9 +1023,9 @@ function paintPills(listId, fields) {
       ondragend="endDrag(event)"
       oncontextmenu="openCtxMenu(event,'${esc(f.name)}','${f.type}')"
       title="Right-click to convert type">
-      <span class="fp-icon">${f.type==='dimension'?'Ⅲ':'#'}</span>
+      <span class="fp-icon">${f.dataType==='date'?'📅':f.type==='dimension'?'Ⅲ':'#'}</span>
       <span class="fp-name">${esc(f.name)}</span>
-      <span class="fp-tag">${f.type==='dimension'?'Abc':'Num'}</span>
+      <span class="fp-tag">${f.dataType==='date'?'Date':f.type==='dimension'?'Abc':'Num'}</span>
     </div>`).join('');
 }
 
@@ -948,21 +1045,205 @@ function startDrag(e,field,type) {
   e.dataTransfer.setDragImage(g,0,0);
 }
 function endDrag(e) {
-  dragF=null;
+  dragF=null; chipDrag=null;
   document.querySelectorAll('.fp').forEach(p=>p.classList.remove('dragging'));
   document.getElementById('drag-ghost').style.display='none';
+  clearDropIndicators();
 }
+
+// ── Mac trackpad pointer-drag fallback ──
+(function() {
+  let pDrag = null, ghost = null, moved = false;
+
+  document.addEventListener('pointerdown', e => {
+    const pill = e.target.closest('.fp[draggable]');
+    if (!pill) return;
+    moved = false;
+    pDrag = {
+      el: pill,
+      field: pill.dataset.field,
+      type: pill.dataset.type,
+      startX: e.clientX, startY: e.clientY,
+      pointerId: e.pointerId
+    };
+    try { pill.setPointerCapture(e.pointerId); } catch(err) {}
+  });
+
+  document.addEventListener('pointermove', e => {
+    if (!pDrag) return;
+    const dx = Math.abs(e.clientX - pDrag.startX);
+    const dy = Math.abs(e.clientY - pDrag.startY);
+    if (!moved && (dx > 6 || dy > 6)) {
+      moved = true;
+      // Start logical drag
+      dragF = { field: pDrag.field, type: pDrag.type };
+      pDrag.el.classList.add('dragging');
+      ghost = document.getElementById('drag-ghost');
+      ghost.textContent = pDrag.field;
+      ghost.style.display = 'block';
+    }
+    if (moved && ghost) {
+      ghost.style.left = (e.clientX + 12) + 'px';
+      ghost.style.top  = (e.clientY + 4)  + 'px';
+      ghost.style.position = 'fixed';
+      // Highlight shelf under cursor
+      ['columns','rows','filters'].forEach(sh => {
+        const el = document.getElementById('shelf-'+sh);
+        const r = el.getBoundingClientRect();
+        const over = e.clientX>=r.left && e.clientX<=r.right && e.clientY>=r.top && e.clientY<=r.bottom;
+        el.classList.toggle('over-cols', over && sh==='columns');
+        el.classList.toggle('over-rows', over && sh==='rows');
+        el.classList.toggle('over-filt', over && sh==='filters');
+      });
+    }
+  });
+
+  document.addEventListener('pointerup', e => {
+    if (!pDrag || !moved) { pDrag=null; return; }
+    // Find which shelf is under cursor
+    ['columns','rows','filters'].forEach(sh => {
+      const el = document.getElementById('shelf-'+sh);
+      const r = el.getBoundingClientRect();
+      if (e.clientX>=r.left && e.clientX<=r.right && e.clientY>=r.top && e.clientY<=r.bottom) {
+        el.classList.remove('over-cols','over-rows','over-filt');
+        // Simulate drop
+        const fakeE = { preventDefault:()=>{}, currentTarget: el, clientX: e.clientX };
+        dragF = { field: pDrag.field, type: pDrag.type };
+        onDrop(fakeE, sh);
+      }
+    });
+    // Cleanup
+    if (pDrag) pDrag.el.classList.remove('dragging');
+    if (ghost) { ghost.style.display='none'; ghost.style.position='fixed'; }
+    document.querySelectorAll('.over-cols,.over-rows,.over-filt').forEach(el=>el.classList.remove('over-cols','over-rows','over-filt'));
+    dragF = null; pDrag = null; moved = false;
+  });
+})();
+
+
 function onDragOver(e,cls) { e.preventDefault(); e.dataTransfer.dropEffect='copy'; e.currentTarget.classList.remove('over-cols','over-rows','over-filt'); e.currentTarget.classList.add('over-'+cls); }
 function onDragLeave(e) { e.currentTarget.classList.remove('over-cols','over-rows','over-filt'); }
 
-function onDrop(e, shelf) {
-  e.preventDefault(); e.currentTarget.classList.remove('over-cols','over-rows','over-filt');
+function onChipDragStart(e, shelf, index, field, type) {
+  e.stopPropagation();
+  chipDrag = { shelf, index, field, type };
+  dragF = null; // not a sidebar drag
+  e.dataTransfer.effectAllowed = 'move';
+  const g = document.getElementById('drag-ghost');
+  g.textContent = field; g.style.display = 'block';
+  e.dataTransfer.setDragImage(g, 0, 0);
+}
+
+function onChipDragOver(e, shelf, index) {
+  e.preventDefault(); e.stopPropagation();
+  if (!chipDrag) return;
+  e.dataTransfer.dropEffect = 'move';
+  clearDropIndicators();
+  const chips = document.querySelectorAll(`#shelf-${shelf} .chip, #shelf-${shelf} .fchip`);
+  
+  const isSameShelf = chipDrag.shelf === shelf;
+  const itemCount = S.shelf[shelf].length;
+  if (chips[index] && !(isSameShelf && itemCount <= 1)) {
+    const rect = chips[index].getBoundingClientRect();
+    const mid = rect.left + rect.width / 2;
+    chips[index].classList.add(e.clientX < mid ? 'chip-drop-before' : 'chip-drop-after');
+  }
+
+  // Highlight the whole shelf too if coming from another shelf
+  if (chipDrag.shelf !== shelf) {
+    document.getElementById('shelf-'+shelf).classList.add('chip-over');
+  }
+}
+
+function onShelfDragOver(e, cls, shelf) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('over-cols','over-rows','over-filt');
+  if (chipDrag) {
+    e.currentTarget.classList.add('chip-over');
+  } else {
+    e.currentTarget.classList.add('over-'+cls);
+  }
+}
+
+function clearDropIndicators() {
+  document.querySelectorAll('.chip-drop-before,.chip-drop-after,.chip-drag-over,.chip-over')
+    .forEach(el => el.classList.remove('chip-drop-before','chip-drop-after','chip-drag-over','chip-over'));
+}
+
+function onDrop(e, shelf, targetIndex) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('over-cols','over-rows','over-filt');
+  clearDropIndicators();
+
+  // ── Chip reorder / cross-shelf move ──
+  if (chipDrag) {
+    const src = chipDrag;
+    chipDrag = null;
+    dragF = null;
+    if (src.shelf === shelf) {
+      // Reorder within same shelf
+      const items = S.shelf[shelf];
+      const item = items.splice(src.index, 1)[0];
+      const dest = targetIndex !== undefined
+        ? (targetIndex > src.index ? targetIndex - 1 : targetIndex)
+        : items.length;
+      items.splice(dest, 0, item);
+    } else {
+      // Move across shelves
+      const item = S.shelf[src.shelf].splice(src.index, 1)[0];
+      // If moving to filters, init filterState
+      if (shelf === 'filters' && !filterState[item.field]) {
+        filterState[item.field] = { field:item.field, type:item.type, selectedValues:[], dataValues:[], stats:null, minVal:'', maxVal:'' };
+      }
+      const dest = targetIndex !== undefined ? targetIndex : S.shelf[shelf].length;
+      S.shelf[shelf].splice(dest, 0, item);
+      paintShelf(src.shelf);
+      if (shelf === 'filters') {
+        paintShelf('filters');
+        fetchValuesAndOpen(item.field, item.type);
+        return;
+      }
+    }
+    paintShelf(shelf);
+    paintShelf(src.shelf);
+    runQuery();
+    return;
+  }
+
   if (!dragF) return;
   if (S.shelf[shelf].find(f=>f.field===dragF.field)) return;
-  
+
+  // Pre-flight cardinality check for non-filter shelves
+  if (shelf !== 'filters' && dragF.type === 'dimension') {
+    const fs = filterState[dragF.field];
+    const WARN_THRESHOLD = 80;
+    if (fs && fs.dataValues.length >= WARN_THRESHOLD) {
+      _pendingDrop = {field:dragF.field, type:dragF.type, shelf};
+      showCardinalityWarning(dragF.field, dragF.type, shelf, fs.dataValues.length);
+      return;
+    } else if (!fs || !fs.dataValues.length) {
+      // Fetch cardinality first, then decide
+      _pendingDrop = {field:dragF.field, type:dragF.type, shelf};
+      const reqId = ++reqCounter;
+      valueCallbacks[reqId] = (payload) => {
+        if (!filterState[dragF.field]) filterState[dragF.field]={field:dragF.field,type:dragF.type,selectedValues:[],dataValues:[],stats:null,minVal:'',maxVal:''};
+        filterState[dragF.field].dataValues = payload.values;
+        if (payload.values.length >= WARN_THRESHOLD) {
+          showCardinalityWarning(dragF.field, dragF.type, shelf, payload.values.length);
+        } else {
+          _pendingDrop = null;
+          proceedDrop(dragF.field, dragF.type, shelf);
+        }
+      };
+      worker.postMessage({type:'GET_VALUES', payload:{field:dragF.field, type:dragF.type, reqId}});
+      return;
+    }
+  }
+
   const schemaEntry = S.schema.find(x=>x.name===dragF.field);
   const item={field:dragF.field, type:dragF.type, agg:dragF.type==='measure'?(schemaEntry?.defaultAgg||'SUM'):null};
   
+
   if (shelf==='filters') {
     // Initialize filter state
     if (!filterState[dragF.field]) {
@@ -1035,9 +1316,15 @@ function paintShelf(name) {
       const summary = getFilterSummary(f.field, f.type);
       const isOpen = openPopoverField === f.field;
       return `<div class="fchip ${isActive?'active-filter':''} ${isOpen?'open':''}" id="fchip-${i}"
+        draggable="true"
+        ondragstart="onChipDragStart(event,'filters',${i},'${esc(f.field)}','${f.type}')"
+        ondragend="endDrag(event)"
+        ondragover="onChipDragOver(event,'filters',${i})"
+        ondrop="onDrop(event,'filters',${i})"
         onclick="onChipClick(event,'${esc(f.field)}','${f.type}',${i})">
+
         <span class="fchip-dot"></span>
-        <span class="fchip-field">${esc(f.field)}</span>
+        <span class="fchip-field">${esc(f.field)}</span>${f.type==='measure'?`<span style="font-family:var(--mono);font-size:9px;opacity:.6;margin-left:2px;">${f.agg||'SUM'}</span>`:''}
         <span class="fchip-summary">${summary}</span>
         <span class="fchip-caret">▾</span>
         <button class="fchip-rm" onclick="removeFilter(event,${i})" title="Remove filter">✕</button>
@@ -1047,8 +1334,28 @@ function paintShelf(name) {
   }
   el.innerHTML = items.map((f,i) => {
     const cls = f.type==='dimension'?'dim':'mea';
-    const agg = f.type==='measure' ? `<select class="agg-sel" onchange="changeAgg('${name}',${i},this.value)" title="Aggregation">${['SUM','AVG','COUNT','COUNTD','MAX','MIN'].map(a=>`<option ${f.agg===a?'selected':''}>${a}</option>`).join('')}</select>` : '';
-    return `<div class="chip ${cls}">${agg}<span>${esc(f.field)}</span><button class="rm" onclick="removeChip('${name}',${i})">✕</button></div>`;
+    const measKey = `${f.agg}(${f.field})`;
+    const curTx = colTransforms[measKey]||'none';
+    const agg = f.type==='measure' ? `
+      <select class="agg-sel" onchange="changeAgg('${name}',${i},this.value)" title="Aggregation">
+        ${['SUM','AVG','COUNT','COUNTD','MAX','MIN'].map(a=>`<option ${f.agg===a?'selected':''}>${a}</option>`).join('')}
+      </select>
+      <select class="agg-sel" onchange="setColTransform('${measKey}',this.value)" title="Table Calculation" style="opacity:.7;max-width:64px;">
+        <option value="none" ${curTx==='none'?'selected':''}>—</option>
+        <option value="pct"  ${curTx==='pct'?'selected':''}>% Total</option>
+        <option value="pct_row" ${curTx==='pct_row'?'selected':''}>% Row</option>
+        <option value="running" ${curTx==='running'?'selected':''}>Running</option>
+        <option value="rank" ${curTx==='rank'?'selected':''}>Rank</option>
+      </select>` : '';
+        return `<div class="chip ${cls}" draggable="true"
+    
+      ondragstart="onChipDragStart(event,'${name}',${i},'${esc(f.field)}','${f.type}')"
+      ondragend="endDrag(event)"
+      ondragover="onChipDragOver(event,'${name}',${i})"
+      ondrop="onDrop(event,'${name}',${i})"
+      style="cursor:grab;"
+      title="Drag to reorder or move to another shelf">
+      ${agg}<span>${esc(f.field)}</span><button class="rm" onclick="removeChip('${name}',${i})">✕</button></div>`;
   }).join('');
 }
 
@@ -1152,6 +1459,31 @@ function buildDimPopover(field) {
     <div class="fp-search-wrap">
       <input class="fp-val-search" placeholder="Search values…" oninput="filterPopoverValues('${esc(field)}',this.value)" autocomplete="off">
     </div>
+
+
+    <div class="fp-topn-bar" style="padding:8px 12px;border-bottom:1px solid var(--rule);display:flex;align-items:center;gap:8px;">
+      <span style="font-size:11px;color:var(--muted);">Top N</span>
+      <input type="number" min="1" max="10000"
+        id="topn-input-${CSS.escape(field)}"
+        placeholder="e.g. 10"
+        value="${filterState[field]?.topN||''}"
+        oninput="setTopN('${esc(field)}',this.value)"
+        style="width:70px;border:1.5px solid var(--rule);border-radius:4px;padding:4px 7px;font-family:var(--mono);font-size:11px;outline:none;background:var(--cream);">
+      <select id="topn-by-${CSS.escape(field)}"
+        onchange="setTopNBy('${esc(field)}',this.value)"
+        style="flex:1;border:1.5px solid var(--rule);border-radius:4px;padding:4px 7px;font-family:var(--font);font-size:11px;outline:none;background:var(--cream);color:var(--ink);">
+        <option value="">— by field —</option>
+        ${S.schema.filter(s=>s.type==='measure').map(s=>`<option value="${esc(s.name)}" ${filterState[field]?.topNBy===s.name?'selected':''}>${esc(s.name)}</option>`).join('')}
+      </select>
+      <select id="topn-dir-${CSS.escape(field)}"
+        onchange="setTopNDir('${esc(field)}',this.value)"
+        style="border:1.5px solid var(--rule);border-radius:4px;padding:4px 7px;font-family:var(--font);font-size:11px;outline:none;background:var(--cream);color:var(--ink);">
+        <option value="top" ${(filterState[field]?.topNDir||'top')==='top'?'selected':''}>Top</option>
+        <option value="bottom" ${filterState[field]?.topNDir==='bottom'?'selected':''}>Bottom</option>
+      </select>
+      ${filterState[field]?.topN?`<button onclick="clearTopN('${esc(field)}')" style="background:none;border:none;color:var(--rose);cursor:pointer;font-size:11px;">✕</button>`:''}
+    </div>
+
     <div class="fp-actions-top">
       <button class="fp-act-btn" onclick="selectAll('${esc(field)}')">Select all</button>
       <span class="fp-act-sep">·</span>
@@ -1159,6 +1491,8 @@ function buildDimPopover(field) {
       <span class="fp-act-sep">·</span>
       <span style="font-size:10.5px;color:var(--faint);font-family:var(--mono)">${fmtN(fs.dataValues.length)} unique</span>
     </div>
+
+
     <div class="fp-val-list" id="fval-list-${CSS.escape(field)}">
       ${buildValList(field, '')}
     </div>
@@ -1338,9 +1672,82 @@ function clearRangeFilter(field) {
   updateRangeFilter(field,'min','');
 }
 
+function setTopN(field, val) {
+  const fs = filterState[field]; if (!fs) return;
+  fs.topN = val ? parseInt(val) : null;
+  paintShelf('filters');
+}
+function setTopNBy(field, val) {
+  const fs = filterState[field]; if (!fs) return;
+  fs.topNBy = val || null;
+}
+function setTopNDir(field, val) {
+  const fs = filterState[field]; if (!fs) return;
+  fs.topNDir = val;
+}
+function clearTopN(field) {
+  const fs = filterState[field]; if (!fs) return;
+  fs.topN = null; fs.topNBy = null; fs.topNDir = 'top';
+  openFilterPopover(field);
+  paintShelf('filters');
+}
+function setColTransform(measKey, val) {
+  colTransforms[measKey] = val==='none' ? null : val;
+  if (S.result) render();
+}
+function applyTransforms(headers, rows) {
+  if (!rows.length) return rows;
+  const out = rows.map(r=>({...r}));
+  const measHeaders = headers.filter(h=>h.includes('('));
+
+  measHeaders.forEach(h => {
+    const tx = colTransforms[h];
+    if (!tx) return;
+    const vals = out.map(r => +r[h]||0);
+    const total = vals.reduce((s,v)=>s+v, 0);
+
+    if (tx === 'pct') {
+      out.forEach((r,i) => r[h] = total ? +((vals[i]/total*100).toFixed(2)) : 0);
+    }
+    else if (tx === 'pct_row') {
+      // % of row total across all measures
+      out.forEach((r,i) => {
+        const rowTotal = measHeaders.reduce((s,mh)=>(+r[mh]||0)+s, 0);
+        r[h] = rowTotal ? +((vals[i]/rowTotal*100).toFixed(2)) : 0;
+      });
+    }
+    else if (tx === 'running') {
+      let acc = 0;
+      out.forEach((r,i) => { acc += vals[i]; r[h] = +acc.toFixed(4); });
+    }
+    else if (tx === 'rank') {
+      const sorted = [...vals].sort((a,b)=>b-a);
+      out.forEach((r,i) => { r[h] = sorted.indexOf(vals[i])+1; });
+    }
+  });
+  return out;
+}
+
 /* ════════════════════════════════════════════
    QUERY
 ════════════════════════════════════════════ */
+let _queryTimer = null;
+let _queryActive = false;
+
+function cancelQuery() {
+  // Terminate and recreate worker
+  worker.terminate();
+  _queryActive = false;
+  clearTimeout(_queryTimer);
+  document.getElementById('query-overlay').style.display='none';
+  setStatus('Query cancelled');
+  // Recreate worker
+  const newWorker = new Worker(URL.createObjectURL(new Blob([WW],{type:'application/javascript'})));
+  newWorker.onerror = function(e){hideProgress();setStatus('⚠ Worker error: '+e.message);};
+  newWorker.onmessage = worker.onmessage;
+  Object.assign(worker, newWorker);
+}
+
 function runQuery() {
   if (!S.schema.length) return;
   const allF=[...S.shelf.columns,...S.shelf.rows];
@@ -1348,18 +1755,43 @@ function runQuery() {
   const meas=allF.filter(f=>f.type==='measure');
   const filters=S.shelf.filters.map(f=>{
     const fs=filterState[f.field]||{};
-    return { field:f.field, type:f.type, selectedValues:fs.selectedValues||[], minVal:fs.minVal||'', maxVal:fs.maxVal||'' };
+    return { field:f.field, type:f.type, selectedValues:fs.selectedValues||[], minVal:fs.minVal||'', maxVal:fs.maxVal||'',
+      topN:fs.topN||null, topNBy:fs.topNBy||null, topNDir:fs.topNDir||'top' };
   });
-  if (!dims.length&&!meas.length) { document.getElementById('empty-state').style.display='flex'; return; }
+  if (!dims.length&&!meas.length) {
+    document.getElementById('empty-state').style.display='flex';
+    document.getElementById('chart-container').style.display='none';
+    document.getElementById('table-container').style.display='none';
+    document.getElementById('table-container').innerHTML='';
+    document.getElementById('export-btn').style.display='none';
+    if (chart) chart.clear();
+    return;
+  }
   document.getElementById('empty-state').style.display='none';
+  const colDims = S.shelf.columns.filter(f=>f.type==='dimension');
+  const rowDims = S.shelf.rows.filter(f=>f.type==='dimension');
+  
+  _queryActive = true;
+  clearTimeout(_queryTimer);
+  _queryTimer = setTimeout(() => {
+    if (_queryActive) {
+      const d = dims.length+meas.length;
+      document.getElementById('query-overlay-sub').textContent =
+        `${fmtN(S.rowCount)} rows · ${d} field${d!==1?'s':''}`;
+      document.getElementById('query-overlay').style.display='flex';
+    }
+  }, 400);
   worker.postMessage({type:'QUERY',payload:{dims,meas,filters,limit:50000}});
+
+  S._pendingShelf = { colDims, rowDims, meas };
 }
 
 /* ════════════════════════════════════════════
    VISUALIZATION
 ════════════════════════════════════════════ */
 function render() {
-  const {headers,rows,total}=S.result;
+  const {headers,total}=S.result;
+  const rows = applyTransforms(S.result.headers, S.result.rows);
   if (!rows||!rows.length) {
     setStatus('No results — no rows match all active filters');
     document.getElementById('chart-container').style.display='none';
@@ -1447,36 +1879,138 @@ function renderChart(headers, rows) {
 }
 
 let sortState = { col: null, dir: 1 };
+const colTransforms = {}; // key: `AGG(field)` → 'pct' | 'running' | null
 
 function renderTable(headers, rows) {
   document.getElementById('chart-container').style.display='none';
   const tc = document.getElementById('table-container');
   tc.style.display = 'block';
 
+  const shelf = S.result._shelf || {};
+  const colDims = shelf.colDims || [];
+  const rowDims = shelf.rowDims || [];
+  const meas    = shelf.meas    || [];
+
+  // ── PIVOT MODE: dims in both Columns AND Rows shelf ──
+  if (colDims.length > 0 && rowDims.length > 0) {
+    renderPivot(tc, rows, colDims, rowDims, meas);
+    return;
+  }
+
+  // ── FLAT TABLE (original behaviour) ──
   let sorted = [...rows];
   if (sortState.col) {
     sorted.sort((a,b) => {
-      const av = a[sortState.col], bv = b[sortState.col];
-      const n = typeof av === 'number';
-      const cmp = n ? av - bv : String(av||'').localeCompare(String(bv||''));
+      const av=a[sortState.col], bv=b[sortState.col];
+      const cmp = typeof av==='number' ? av-bv : String(av||'').localeCompare(String(bv||''));
       return cmp * sortState.dir;
     });
   }
-
   tc.innerHTML = `<table>
     <thead><tr>${headers.map(h => {
-      const isSorted = sortState.col === h;
+      const isSorted = sortState.col===h;
       const arrow = isSorted ? (sortState.dir===1?' ↑':' ↓') : '';
-      return `<th style="cursor:pointer;user-select:none;" onclick="sortTable('${esc(h)}')">${esc(h)}${arrow}</th>`;
+      const tx = colTransforms[h];
+      const txBadge = tx ? `<span style="font-size:9px;background:var(--sky-lt);color:var(--sky);border-radius:3px;padding:1px 4px;margin-left:4px;font-weight:600;">${tx==='pct'?'%∑':tx==='pct_row'?'%row':tx==='running'?'∑↓':'#'}</span>` : '';
+      return `<th style="cursor:pointer;user-select:none;" onclick="sortTable('${esc(h)}')">${esc(h)}${txBadge}${arrow}</th>`;
     }).join('')}</tr></thead>
     <tbody>${sorted.slice(0,10000).map(row=>`<tr>${headers.map(h=>{
       const v=row[h], n=typeof v==='number';
-      return `<td class="${n?'num':''}">${n?applyNumFormat(v,h):esc(String(v??''))}</td>`;
+      const tx = colTransforms[h];
+      const display = n
+        ? (tx==='pct'||tx==='pct_row') ? v.toFixed(2)+'%' : tx==='rank' ? '#'+v : applyNumFormat(v,h)
+        : esc(String(v??''));
+      return `<td class="${n?'num':''}">${display}</td>`;
     }).join('')}</tr>`).join('')}</tbody>
   </table>
   <div style="padding:8px 14px;font-size:11px;color:var(--muted);background:var(--white);border-top:1px solid var(--rule);position:sticky;bottom:0;">
     Showing ${fmtN(Math.min(sorted.length,10000))} of ${fmtN(sorted.length)} groups
-    ${sorted.length > 10000 ? ' — <span style="color:var(--rose)">table capped at 10K rows</span>' : ''}
+    ${sorted.length>10000?' — <span style="color:var(--rose)">table capped at 10K rows</span>':''}
+  </div>`;
+}
+
+function renderPivot(tc, rows, colDims, rowDims, meas) {
+  // Unique col dim values (combined key if multiple col dims)
+  const colKey = r => colDims.map(d=>String(r[d.field]||'')).join(' › ');
+  const rowKey = r => rowDims.map(d=>String(r[d.field]||'')).join('\x00');
+
+  const colVals = [...new Set(rows.map(colKey))].sort();
+  const measKeys = meas.length ? meas.map(m=>`${m.agg}(${m.field})`) : [];
+
+  // Build lookup: rowKey+colKey → row data
+  const lookup = new Map();
+  rows.forEach(r => {
+    const rk = rowKey(r), ck = colKey(r);
+    if (!lookup.has(rk)) lookup.set(rk, {});
+    lookup.get(rk)[ck] = r;
+  });
+
+  // Unique row combinations in order
+  const rowKeys = [...new Set(rows.map(rowKey))];
+
+  // Header — row dim labels + one col per unique col value (× measures)
+  const rowDimHeaders = rowDims.map(d=>`<th style="cursor:default;background:var(--cream);border-right:2px solid var(--rule);">${esc(d.field)}</th>`).join('');
+
+  let colHeaders1 = `<tr>${rowDims.map(()=>`<th style="background:var(--cream);border-right:2px solid var(--rule);"></th>`).join('')}`;
+  colVals.forEach(cv => {
+    const span = measKeys.length||1;
+    colHeaders1 += `<th colspan="${span}" style="text-align:center;background:var(--forest-lt);color:var(--forest);border-right:2px solid var(--rule);border-bottom:1px solid var(--forest-mid);font-weight:700;">${esc(cv)}</th>`;
+  });
+  colHeaders1 += '</tr>';
+
+  // Second header row for measures (only if measures exist)
+  let colHeaders2 = '';
+  if (measKeys.length > 1) {
+    colHeaders2 = `<tr>${rowDims.map(()=>`<th style="background:var(--cream);border-right:2px solid var(--rule);"></th>`).join('')}`;
+    colVals.forEach(() => {
+      measKeys.forEach(mk => {
+        colHeaders2 += `<th style="background:var(--white);color:var(--amber);font-size:10px;text-align:center;border-right:1px solid var(--rule);">${esc(mk)}</th>`;
+      });
+      colHeaders2 = colHeaders2.replace(/<\/th>$/, ' style="border-right:2px solid var(--rule)">'); 
+    });
+    colHeaders2 += '</tr>';
+  }
+
+  // Body rows
+  let tbody = '';
+  rowKeys.forEach((rk, ri) => {
+    const rowData = lookup.get(rk) || {};
+    // Get display values for row dims from first matching row
+    const firstRow = rows.find(r=>rowKey(r)===rk);
+    const rowDimCells = rowDims.map(d=>`<td style="font-weight:500;background:var(--cream);border-right:2px solid var(--rule);white-space:nowrap;">${esc(String(firstRow?.[d.field]||''))}</td>`).join('');
+
+    let cells = '';
+    colVals.forEach((cv, ci) => {
+      const cellRow = rowData[cv];
+      const isLastCol = ci === colVals.length-1;
+      if (measKeys.length) {
+        measKeys.forEach((mk, mi) => {
+          const v = cellRow?.[mk];
+          const isNum = typeof v==='number';
+          const isLastMea = mi === measKeys.length-1;
+          cells += `<td class="${isNum?'num':''}" style="${isLastMea&&!isLastCol?'border-right:2px solid var(--rule);':''}">${v!==undefined?(isNum?applyNumFormat(v,mk):esc(String(v))):'<span style="color:var(--faint)">—</span>'}</td>`;
+        });
+      } else {
+        const v = cellRow ? fmtN(1) : '<span style="color:var(--faint)">—</span>';
+        cells += `<td style="text-align:center;font-family:var(--mono);${!isLastCol?'border-right:2px solid var(--rule);':''}">${v}</td>`;
+      }
+    });
+    tbody += `<tr style="background:${ri%2===0?'#fff':'#FAFAF8'}">${rowDimCells}${cells}</tr>`;
+  });
+
+  tc.innerHTML = `<table style="border-collapse:collapse;font-size:12px;width:100%;">
+    <thead>${colHeaders1}${colHeaders2}
+      <tr>${rowDimHeaders}${colVals.map((cv,ci)=>{
+        const isLast=ci===colVals.length-1;
+        if (!measKeys.length) return `<th style="text-align:center;cursor:default;${!isLast?'border-right:2px solid var(--rule);':''}">${esc(cv)}</th>`;
+        return measKeys.map((mk,mi)=>`<th style="text-align:right;cursor:default;font-size:10px;color:var(--muted);${mi===measKeys.length-1&&!isLast?'border-right:2px solid var(--rule);':''}">${esc(mk)}</th>`).join('');
+      }).join('')}</tr>
+    </thead>
+    <tbody>${tbody}</tbody>
+  </table>
+  <div style="padding:8px 14px;font-size:11px;color:var(--muted);background:var(--white);border-top:1px solid var(--rule);position:sticky;bottom:0;">
+    Pivot: ${fmtN(rowKeys.length)} rows × ${fmtN(colVals.length)} columns
+    ${colVals.length>100?' — <span style="color:var(--rose)">large pivot, consider filtering</span>':''}
   </div>`;
 }
 
@@ -1502,6 +2036,7 @@ function clearAll() {
   document.getElementById('chart-container').style.display='none';
   document.getElementById('table-container').style.display='none';
   document.getElementById('export-btn').style.display='none';
+  Object.keys(colTransforms).forEach(k=>delete colTransforms[k]);
   if(chart)chart.clear();
 }
 
@@ -1525,6 +2060,65 @@ function exportCSV() {
   a.download=`${S.filename.replace(/\.[^.]+$/,'')}_result.csv`;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+let _pendingDrop = null;
+
+function closeCardModal() {
+  document.getElementById('cardinality-modal').style.display='none';
+}
+
+function showCardinalityWarning(field, type, shelf, uniqueCount) {
+  const isColShelf = shelf === 'columns';
+  document.getElementById('card-subtitle').textContent = `"${field}" has ${fmtN(uniqueCount)} unique values`;
+  document.getElementById('card-body').innerHTML =
+    `Adding <strong>${esc(field)}</strong> to <strong>${shelf}</strong> will create
+    <strong style="color:var(--rose)">${fmtN(uniqueCount)} ${isColShelf?'columns':'rows'}</strong> in your view.
+    <br><br>This may cause the UI to freeze or render slowly. Consider filtering this field first to narrow it down.`;
+
+  document.getElementById('card-stats').innerHTML = `
+    <div style="flex:1;background:var(--amber-lt);border:1px solid var(--amber-mid);border-radius:6px;padding:10px 12px;text-align:center;">
+      <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:var(--amber);">${fmtN(uniqueCount)}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px;">Unique values</div>
+    </div>
+    <div style="flex:1;background:var(--forest-lt);border:1px solid var(--forest-mid);border-radius:6px;padding:10px 12px;text-align:center;">
+      <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:var(--forest);">${uniqueCount>500?'🔴 High':uniqueCount>100?'🟡 Med':'🟢 OK'}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px;">Risk level</div>
+    </div>`;
+
+  document.getElementById('card-filter-btn').onclick = () => {
+    if (_pendingDrop) {
+      const {field:f, type:t} = _pendingDrop;
+      _pendingDrop = null;
+      closeCardModal();
+
+      // Add to filters instead
+      if (!filterState[f]) filterState[f]={field:f,type:t,selectedValues:[],dataValues:[],stats:null,minVal:'',maxVal:''};
+      if (!S.shelf.filters.find(x=>x.field===f)) {
+        S.shelf.filters.push({field:f,type:t,agg:null});
+        paintShelf('filters');
+        fetchValuesAndOpen(f, t);
+      }
+    }
+  };
+  document.getElementById('card-anyway-btn').onclick = () => {
+    if (_pendingDrop) {
+      const {field:f, type:t, shelf:sh} = _pendingDrop;
+      _pendingDrop = null;
+      closeCardModal();
+
+      proceedDrop(f, t, sh);
+    }
+  };
+  document.getElementById('cardinality-modal').style.display='flex';
+}
+
+function proceedDrop(field, type, shelf) {
+  const schemaEntry = S.schema.find(x=>x.name===field);
+  const item = {field, type, agg: type==='measure'?(schemaEntry?.defaultAgg||'SUM'):null};
+  S.shelf[shelf].push(item);
+  paintShelf(shelf);
+  runQuery();
 }
 
 function showSkipLog() {
@@ -1661,6 +2255,40 @@ function crossDrop(e, targetType) {
     </div>
   </div>
 </div>
+
+<div id="cardinality-modal" style="display:none;position:fixed;inset:0;background:rgba(26,26,24,.45);z-index:9998;align-items:center;justify-content:center;">
+  <div style="background:#fff;border-radius:12px;box-shadow:var(--shadow-lg);width:420px;max-width:95vw;overflow:hidden;animation:popIn .18s cubic-bezier(.34,1.56,.64,1);">
+    <div style="padding:6px 14px;background:linear-gradient(135deg,#FDF0E6,#fff);border-bottom:1.5px solid var(--amber-mid);display:flex;align-items:center;gap:10px;">
+      <span style="font-size:22px;">⚠️</span>
+      <div>
+        <div style="font-family:var(--serif);font-size:15px;color:var(--ink);">Large field detected</div>
+        <div id="card-subtitle" style="font-size:11px;color:var(--muted);margin-top:1px;"></div>
+      </div>
+    </div>
+    <div style="padding:18px 20px;">
+      <div id="card-body" style="font-size:12.5px;color:var(--ink2);line-height:1.7;"></div>
+      <div id="card-stats" style="display:flex;gap:10px;margin-top:14px;"></div>
+    </div>
+    <div style="padding:12px 20px;border-top:1px solid var(--rule);display:flex;gap:8px;justify-content:flex-end;background:#FDFCFA;">
+      <button id="card-filter-btn" style="background:var(--forest);color:#fff;border:none;border-radius:5px;padding:7px 16px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);">Add to Filters Instead</button>
+      <button id="card-anyway-btn" style="background:transparent;border:1.5px solid var(--rule);border-radius:5px;padding:7px 16px;font-size:12px;cursor:pointer;font-family:var(--font);color:var(--muted);">Add Anyway</button>
+      <button onclick="closeCardModal()" style="background:transparent;border:none;font-size:12px;cursor:pointer;font-family:var(--font);color:var(--faint);">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="query-overlay" style="display:none;position:fixed;inset:0;background:rgba(250,248,244,.75);z-index:8000;align-items:center;justify-content:center;backdrop-filter:blur(4px);">
+  <div style="background:#fff;border-radius:10px;box-shadow:var(--shadow-lg);padding:24px 32px;text-align:center;min-width:300px;border:1.5px solid var(--rule);">
+    <div style="width:36px;height:36px;border:3px solid var(--forest-mid);border-top-color:var(--forest);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 14px;"></div>
+    <div style="font-family:var(--serif);font-size:15px;color:var(--ink);margin-bottom:4px;">Processing query…</div>
+    <div id="query-overlay-sub" style="font-size:11px;color:var(--muted);font-family:var(--mono);margin-bottom:16px;">Aggregating data</div>
+    <button onclick="cancelQuery()" style="background:transparent;border:1.5px solid var(--rose);color:var(--rose);border-radius:5px;padding:6px 18px;font-size:12px;cursor:pointer;font-family:var(--font);transition:all .15s;">✕ Cancel</button>
+  </div>
+</div>
+<style>
+@keyframes spin { to { transform:rotate(360deg); } }
+</style>
+
 
 </body>
 </html>
