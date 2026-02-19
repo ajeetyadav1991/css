@@ -276,6 +276,8 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
   <input type="file" id="file-input" accept=".csv,.xlsx,.xls">
   <div id="status-bar">No data loaded — upload a CSV or Excel file to begin</div>
   <span id="row-badge" class="stat-badge"></span>
+  <span id="skip-badge" style="display:none;background:#FDF0E6;color:#C45C00;border:1px solid #F2C89A;border-radius:20px;padding:3px 10px;font-size:10.5px;font-weight:600;font-family:var(--mono);white-space:nowrap;cursor:pointer;"></span>
+  
   <div class="topbar-div"></div>
   <div class="seg-control">
     <button class="seg-btn active" data-ct="bar"     onclick="setChart('bar')">Bar</button>
@@ -384,6 +386,7 @@ const WW = `
     else if (type === 'LOAD_COLS')   loadCols(payload);
     else if (type === 'GET_VALUES')  getValues(payload);
     else if (type === 'QUERY')       query(payload);
+    else if (type === 'RENAME_COL')  { const v=cols[payload.from]; if(v){cols[payload.to]=v; delete cols[payload.from];} }
   };
 
   function loadCols({ columns, sch, count }) {
@@ -501,6 +504,7 @@ const WW = `
     const dLen = dims.length, mLen = meas.length;
     const hasCd = meas.some(m => m.agg === 'COUNTD');
 
+    const skipped = [];
     for (let i = 0; i < rowCount; i++) {
       let pass = true;
       for (let fi = 0; fi < fns.length; fi++) if (!fns[fi](i)) { pass=false; break; }
@@ -512,7 +516,12 @@ const WW = `
         const v = cols[dims[d].field] ? cols[dims[d].field][i] : '';
         if (v === '' || v === null || v === undefined) { hasBlank = true; break; }
       }
-      if (hasBlank) continue;
+      if (hasBlank) {
+        const rowData = {};
+        schema.forEach(s => { rowData[s.name] = cols[s.name] ? cols[s.name][i] : ''; });
+        skipped.push({ row: i+1, reason: 'Blank dimension value', data: rowData });
+        continue;
+      }
 
       // Build group key
       let key = '';
@@ -565,7 +574,7 @@ const WW = `
     if (dLen>0) rows.sort((a,b)=>String(a[dims[0].field]||'').localeCompare(String(b[dims[0].field]||'')));
     const limited = rows.slice(0, limit||50000);
     const headers = [...dims.map(d=>d.field),...meas.map(m=>m.agg+'('+m.field+')')];
-    self.postMessage({ type:'RESULT', payload:{ headers, rows:limited, total:rows.length } });
+    self.postMessage({ type:'RESULT', payload:{ headers, rows:limited, total:rows.length, skipped } });
   }
 `;
 
@@ -576,7 +585,7 @@ worker.onerror = function(e) { hideProgress(); setStatus('⚠ Worker error: ' + 
    STATE
 ════════════════════════════════════════════ */
 const S = {
-  schema: [], rowCount: 0, filename: '',
+  schema: [], rowCount: 0, filename: '', skipped: [],
   shelf: { columns:[], rows:[], filters:[] },
   chartType: 'bar', view: 'chart', result: null,
 };
@@ -609,7 +618,9 @@ worker.onmessage = ({ data: { type, payload } }) => {
     const cb = valueCallbacks[payload.reqId];
     if (cb) { cb(payload); delete valueCallbacks[payload.reqId]; }
   } else if (type === 'RESULT') {
-    S.result = payload; render();
+    S.result = payload;
+    S.skipped = payload.skipped || [];
+    render();
   }
 };
 
@@ -693,8 +704,9 @@ function readXLSX(file) {
    SIDEBAR
 ════════════════════════════════════════════ */
 function buildSidebar() {
-  const dims=S.schema.filter(s=>s.type==='dimension');
-  const meas=S.schema.filter(s=>s.type==='measure');
+  const dims=S.schema.filter(s=>s.type==='dimension' && !s.hidden);
+  const meas=S.schema.filter(s=>s.type==='measure' && !s.hidden);
+
   document.getElementById('dim-count').textContent=dims.length;
   document.getElementById('mea-count').textContent=meas.length;
   paintPills('dim-list',dims);
@@ -726,23 +738,183 @@ function convertField(field, toType) {
 }
 
 let ctxField = null;
+
 function openCtxMenu(e, field, currentType) {
   e.preventDefault(); e.stopPropagation();
   ctxField = field;
+  const s = S.schema.find(x=>x.name===field) || {};
+  const isDim = currentType === 'dimension';
   const menu = document.getElementById('ctx-menu');
-  const btn  = document.getElementById('ctx-convert');
-  const toType = currentType==='dimension' ? 'measure' : 'dimension';
-  const icon   = toType==='measure' ? '#' : 'Ⅲ';
-  const color  = toType==='measure' ? 'var(--amber)' : 'var(--forest)';
-  btn.innerHTML = `<span style="color:${color};font-weight:700">${icon}</span> Convert to <strong>${toType}</strong>`;
-  btn.onclick = () => { convertField(field, toType); closeCtxMenu(); };
+
+  let html = '';
+
+  // ── Field name header ──
+  html += `<div class="ctx-label">${esc(field.length>22?field.slice(0,22)+'…':field)}</div>`;
+  html += `<div class="ctx-sep"></div>`;
+
+  // ── Add to shelf ──
+  html += `<div class="ctx-item" onclick="addToShelf('${esc(field)}','${currentType}','columns');closeCtxMenu()">
+    <span>Add to Columns</span>
+  </div>`;
+  html += `<div class="ctx-item" onclick="addToShelf('${esc(field)}','${currentType}','rows');closeCtxMenu()">
+    <span>Add to Rows</span>
+  </div>`;
+  html += `<div class="ctx-item" onclick="addToShelf('${esc(field)}','${currentType}','filters');closeCtxMenu()">
+    <span>Add to Filters</span>
+  </div>`;
+
+  html += `<div class="ctx-sep"></div>`;
+
+  // ── Convert type ──
+  const toType = isDim ? 'measure' : 'dimension';
+  const toIcon = isDim ? '#' : 'Ⅲ';
+  html += `<div class="ctx-item" onclick="convertField('${esc(field)}','${toType}');closeCtxMenu()">
+    <span><span style="color:${isDim?'var(--amber)':'var(--forest)'};font-weight:700;margin-right:5px;">${toIcon}</span>Convert to ${toType}</span>
+  </div>`;
+
+  // ── Change Data Type (submenu) ──
+  const curDt = s.dataType || (isDim?'string':'decimal');
+  const dtOptions = isDim
+    ? [['string','String (Abc)'],['decimal','Number (decimal)'],['whole','Number (whole)']]
+    : [['decimal','Number (decimal)'],['whole','Number (whole)'],['string','String']];
+  html += `<div class="ctx-item">
+    <span>Change Data Type</span><span class="ctx-arrow">▶</span>
+    <div class="ctx-sub">
+      ${dtOptions.map(([v,l])=>`<div class="ctx-item" onclick="changeDataType('${esc(field)}','${v}');closeCtxMenu()">
+        <span>${l}</span>${curDt===v?'<span class="ctx-check">✓</span>':''}
+      </div>`).join('')}
+    </div>
+  </div>`;
+
+  // ── Measure-only options ──
+  if (!isDim) {
+    const curAgg = s.defaultAgg || 'SUM';
+    html += `<div class="ctx-item">
+      <span>Default Aggregation</span><span class="ctx-arrow">▶</span>
+      <div class="ctx-sub">
+        ${['SUM','AVG','COUNT','COUNTD','MAX','MIN'].map(a=>`<div class="ctx-item" onclick="setDefaultAgg('${esc(field)}','${a}');closeCtxMenu()">
+          <span>${a}</span>${curAgg===a?'<span class="ctx-check">✓</span>':''}
+        </div>`).join('')}
+      </div>
+    </div>`;
+
+    const curFmt = s.numFormat || 'default';
+    html += `<div class="ctx-item">
+      <span>Number Format</span><span class="ctx-arrow">▶</span>
+      <div class="ctx-sub">
+        ${[['default','Default'],['integer','Integer (1,234)'],['decimal2','Decimal (1,234.56)'],['pct','Percentage (12.3%)'],['currency','Currency ($1,234)']].map(([v,l])=>`<div class="ctx-item" onclick="setNumFormat('${esc(field)}','${v}');closeCtxMenu()">
+          <span>${l}</span>${curFmt===v?'<span class="ctx-check">✓</span>':''}
+        </div>`).join('')}
+      </div>
+    </div>`;
+  }
+
+  html += `<div class="ctx-sep"></div>`;
+
+  // ── Rename ──
+  html += `<div class="ctx-item" onclick="renameField('${esc(field)}');closeCtxMenu()">
+    <span>Rename…</span>
+  </div>`;
+
+  // ── Hide ──
+  const isHidden = s.hidden || false;
+  html += `<div class="ctx-item" onclick="toggleHideField('${esc(field)}');closeCtxMenu()">
+    <span style="color:${isHidden?'var(--forest)':'var(--muted)'}">${isHidden?'✓ Show field':'Hide field'}</span>
+  </div>`;
+
+  document.getElementById('ctx-menu-inner').innerHTML = html;
   menu.style.display = 'block';
-  // Position — keep inside viewport
-  const x = Math.min(e.clientX, window.innerWidth-200);
-  const y = Math.min(e.clientY, window.innerHeight-80);
+  const x = Math.min(e.clientX, window.innerWidth-220);
+  const y = Math.min(e.clientY, window.innerHeight-320);
   menu.style.left = x+'px'; menu.style.top = y+'px';
 }
+
 function closeCtxMenu() { document.getElementById('ctx-menu').style.display='none'; ctxField=null; }
+
+function addToShelf(field, type, shelf) {
+  if (!shelf) shelf = type==='dimension' ? 'columns' : 'rows';
+  if (S.shelf[shelf].find(f=>f.field===field)) return;
+  const s = S.schema.find(x=>x.name===field);
+  const defaultAgg = s?.defaultAgg || 'SUM';
+  S.shelf[shelf].push({field, type, agg: type==='measure'?defaultAgg:null});
+  paintShelf(shelf); runQuery();
+}
+
+function renameField(field) {
+  const newName = window.prompt('Rename field:', field);
+  if (!newName || newName.trim()==='' || newName===field) return;
+  const n = newName.trim();
+  // Update schema
+  const s = S.schema.find(x=>x.name===field);
+  if (!s) return;
+  s.name = n;
+  // Update cols in worker — send rename message
+  worker.postMessage({type:'RENAME_COL', payload:{from:field, to:n}});
+  // Update shelves
+  ['columns','rows','filters'].forEach(sh=>{
+    S.shelf[sh].forEach(f=>{ if(f.field===field) f.field=n; });
+  });
+  // Update filterState
+  if (filterState[field]) { filterState[n]=filterState[field]; filterState[n].field=n; delete filterState[field]; }
+  buildSidebar(); paintAllShelves(); runQuery();
+}
+
+function toggleHideField(field) {
+  const s = S.schema.find(x=>x.name===field); if (!s) return;
+  s.hidden = !s.hidden;
+  // Remove from shelves if hiding
+  if (s.hidden) {
+    ['columns','rows','filters'].forEach(sh=>{
+      S.shelf[sh] = S.shelf[sh].filter(f=>f.field!==field);
+    });
+    paintAllShelves();
+  }
+  buildSidebar(); runQuery();
+}
+
+function changeDataType(field, dtype) {
+  const s = S.schema.find(x=>x.name===field); if (!s) return;
+  s.dataType = dtype;
+  // If switching dimension to number type → convert to measure
+  if (s.type==='dimension' && (dtype==='decimal'||dtype==='whole')) {
+    convertField(field, 'measure');
+  } else if (s.type==='measure' && dtype==='string') {
+    convertField(field, 'dimension');
+  } else {
+    buildSidebar();
+  }
+}
+
+function setDefaultAgg(field, agg) {
+  const s = S.schema.find(x=>x.name===field); if (!s) return;
+  s.defaultAgg = agg;
+  // Update any existing shelf chips using this field
+  ['columns','rows'].forEach(sh=>{
+    S.shelf[sh].forEach(f=>{ if(f.field===field && f.type==='measure') f.agg=agg; });
+  });
+  paintAllShelves(); runQuery();
+}
+
+function setNumFormat(field, fmt) {
+  const s = S.schema.find(x=>x.name===field); if (!s) return;
+  s.numFormat = fmt;
+  if (S.result) render();
+}
+
+function applyNumFormat(val, field) {
+  const s = S.schema.find(x=>x.name===field);
+  const fmt = s?.numFormat || 'default';
+  if (typeof val !== 'number') return esc(String(val??''));
+  switch(fmt) {
+    case 'integer':  return Math.round(val).toLocaleString();
+    case 'decimal2': return val.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+    case 'pct':      return (val*100).toFixed(1)+'%';
+    case 'currency': return '$'+val.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+    default:         return val.toLocaleString(undefined,{maximumFractionDigits:4});
+  }
+}
+
+
 document.addEventListener('click', closeCtxMenu);
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeCtxMenu(); });
 
@@ -787,7 +959,10 @@ function onDrop(e, shelf) {
   e.preventDefault(); e.currentTarget.classList.remove('over-cols','over-rows','over-filt');
   if (!dragF) return;
   if (S.shelf[shelf].find(f=>f.field===dragF.field)) return;
-  const item={field:dragF.field, type:dragF.type, agg:dragF.type==='measure'?'SUM':null};
+  
+  const schemaEntry = S.schema.find(x=>x.name===dragF.field);
+  const item={field:dragF.field, type:dragF.type, agg:dragF.type==='measure'?(schemaEntry?.defaultAgg||'SUM'):null};
+  
   if (shelf==='filters') {
     // Initialize filter state
     if (!filterState[dragF.field]) {
@@ -1296,7 +1471,7 @@ function renderTable(headers, rows) {
     }).join('')}</tr></thead>
     <tbody>${sorted.slice(0,10000).map(row=>`<tr>${headers.map(h=>{
       const v=row[h], n=typeof v==='number';
-      return `<td class="${n?'num':''}">${n?v.toLocaleString(undefined,{maximumFractionDigits:4}):esc(String(v??''))}</td>`;
+      return `<td class="${n?'num':''}">${n?applyNumFormat(v,h):esc(String(v??''))}</td>`;
     }).join('')}</tr>`).join('')}</tbody>
   </table>
   <div style="padding:8px 14px;font-size:11px;color:var(--muted);background:var(--white);border-top:1px solid var(--rule);position:sticky;bottom:0;">
@@ -1352,13 +1527,67 @@ function exportCSV() {
   URL.revokeObjectURL(a.href);
 }
 
+function showSkipLog() {
+  if (!S.skipped.length) return;
+  const modal = document.getElementById('skip-modal');
+  document.getElementById('skip-modal-sub').textContent =
+    `${fmtN(S.skipped.length)} of ${fmtN(S.rowCount)} rows excluded from current query`;
+  // Build columns: Row#, Reason, then all schema fields
+  const cols = S.schema.map(s => s.name);
+  document.getElementById('skip-thead').innerHTML =
+    `<tr style="background:var(--white);">
+      <th style="padding:8px 12px;text-align:left;font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);border-bottom:2px solid var(--rule);white-space:nowrap;">Row #</th>
+      <th style="padding:8px 12px;text-align:left;font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--rose);border-bottom:2px solid var(--rule);white-space:nowrap;">Reason</th>
+      ${cols.map(c=>`<th style="padding:8px 12px;text-align:left;font-size:10px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);border-bottom:2px solid var(--rule);white-space:nowrap;">${esc(c)}</th>`).join('')}
+    </tr>`;
+  document.getElementById('skip-tbody').innerHTML =
+    S.skipped.slice(0,1000).map((s,idx) => {
+      const rowCells = cols.map(c => {
+        const v = s.data ? s.data[c] : '';
+        return `<td style="padding:7px 12px;border-bottom:1px solid var(--rule);color:var(--ink2);">${esc(String(v??''))}</td>`;
+      }).join('');
+      return `<tr style="background:${idx%2===0?'#fff':'#FAFAF8'}">
+        <td style="padding:7px 12px;border-bottom:1px solid var(--rule);font-family:var(--mono);color:var(--muted);">${fmtN(s.row)}</td>
+        <td style="padding:7px 12px;border-bottom:1px solid var(--rule);color:var(--rose);font-weight:500;">${esc(s.reason)}</td>
+        ${rowCells}
+      </tr>`;
+    }).join('') +
+    (S.skipped.length>1000 ? `<tr><td colspan="${cols.length+2}" style="padding:12px;text-align:center;color:var(--muted);font-style:italic;">Showing first 1,000 of ${fmtN(S.skipped.length)} skipped rows — export for full log</td></tr>` : '');
+  modal.style.display = 'flex';
+}
+
+function closeSkipLog() { document.getElementById('skip-modal').style.display='none'; }
+
+function exportSkipLog() {
+  if (!S.skipped.length) return;
+  const cols = S.schema.map(s=>s.name);
+  const lines = [['Row #','Reason',...cols].map(h=>`"${h}"`).join(',')];
+  S.skipped.forEach(s => {
+    const row = [s.row, s.reason, ...cols.map(c=>s.data?s.data[c]:'')];
+    lines.push(row.map(v=>typeof v==='number'?v:`"${String(v??'').replace(/"/g,'""')}"`).join(','));
+  });
+  const blob = new Blob([lines.join('\n')],{type:'text/csv'});
+  const a = document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download=`skipped_rows_log.csv`; a.click(); URL.revokeObjectURL(a.href);
+}
+
 /* ════════════════════════════════════════════
    PROGRESS + UTILS
 ════════════════════════════════════════════ */
 function showProgress(title,pct,sub) { document.getElementById('progress-overlay').classList.add('show'); document.getElementById('progress-title').textContent=title; document.getElementById('progress-sub').textContent=sub; document.getElementById('prog-fill').style.width=pct+'%'; document.getElementById('prog-pct').textContent=pct+'%'; }
 function setProgress(pct,sub) { document.getElementById('prog-fill').style.width=pct+'%'; document.getElementById('prog-pct').textContent=pct+'%'; document.getElementById('progress-sub').textContent=sub; }
 function hideProgress() { document.getElementById('progress-overlay').classList.remove('show'); }
-function setStatus(msg) { document.getElementById('status-bar').textContent=msg; }
+function setStatus(msg) {
+  document.getElementById('status-bar').textContent = msg;
+  const badge = document.getElementById('skip-badge');
+  if (S.skipped && S.skipped.length) {
+    badge.textContent = `⚠ ${fmtN(S.skipped.length)} rows skipped`;
+    badge.style.display = '';
+    badge.onclick = () => showSkipLog();
+  } else {
+    badge.style.display = 'none';
+  }
+}
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function fmtN(n) { return Number(n).toLocaleString(); }
 
@@ -1395,13 +1624,43 @@ function crossDrop(e, targetType) {
 
 </script>
 
-<div id="ctx-menu" style="display:none;position:fixed;z-index:9999;background:#fff;border:1.5px solid var(--rule);border-radius:7px;box-shadow:var(--shadow-lg);padding:4px;min-width:180px;">
-  <div id="ctx-convert" style="padding:7px 12px;font-size:12px;cursor:pointer;border-radius:4px;display:flex;align-items:center;gap:8px;" onmouseenter="this.style.background='var(--cream)'" onmouseleave="this.style.background='transparent'"></div>
-  <div style="height:1px;background:var(--rule);margin:3px 0;"></div>
-  <div style="padding:7px 12px;font-size:11px;color:var(--muted);cursor:default;">Type override</div>
+<div id="ctx-menu" style="display:none;position:fixed;z-index:9999;background:#fff;border:1.5px solid var(--rule);border-radius:7px;box-shadow:var(--shadow-lg);padding:4px;min-width:200px;font-family:var(--font);">
+  <div id="ctx-menu-inner"></div>
 </div>
+<style>
+.ctx-item { padding:7px 12px;font-size:12px;cursor:pointer;border-radius:4px;display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--ink2);position:relative; }
+.ctx-item:hover { background:var(--cream); }
+.ctx-item.disabled { color:var(--faint);cursor:default; }
+.ctx-item.disabled:hover { background:transparent; }
+.ctx-sep { height:1px;background:var(--rule);margin:3px 0; }
+.ctx-label { font-size:10px;font-weight:700;letter-spacing:.9px;text-transform:uppercase;color:var(--muted);padding:6px 12px 2px;cursor:default; }
+.ctx-arrow { font-size:9px;opacity:.5; }
+.ctx-sub { display:none;position:absolute;left:100%;top:-4px;background:#fff;border:1.5px solid var(--rule);border-radius:7px;box-shadow:var(--shadow-lg);padding:4px;min-width:170px;z-index:10000; }
+.ctx-item:hover > .ctx-sub { display:block; }
+.ctx-check { color:var(--forest);font-size:11px;font-weight:700; }
+</style>
 
-
+<div id="skip-modal" style="display:none;position:fixed;inset:0;background:rgba(26,26,24,.4);z-index:9999;align-items:center;justify-content:center;">
+  <div style="background:#fff;border-radius:10px;box-shadow:var(--shadow-lg);width:700px;max-width:95vw;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="padding:16px 20px;border-bottom:1.5px solid var(--rule);display:flex;align-items:center;justify-content:space-between;">
+      <div>
+        <div style="font-family:var(--serif);font-size:16px;">Skipped Rows Log</div>
+        <div id="skip-modal-sub" style="font-size:11px;color:var(--muted);margin-top:2px;"></div>
+      </div>
+      <button onclick="closeSkipLog()" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--muted);">✕</button>
+    </div>
+    <div style="overflow:auto;flex:1;">
+      <table id="skip-table" style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead id="skip-thead" style="position:sticky;top:0;"></thead>
+        <tbody id="skip-tbody"></tbody>
+      </table>
+    </div>
+    <div style="padding:10px 20px;border-top:1px solid var(--rule);display:flex;gap:8px;justify-content:flex-end;">
+      <button onclick="exportSkipLog()" style="background:var(--forest);color:#fff;border:none;border-radius:5px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:var(--font);">↓ Export Log</button>
+      <button onclick="closeSkipLog()" style="background:transparent;border:1.5px solid var(--rule);border-radius:5px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:var(--font);">Close</button>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>
