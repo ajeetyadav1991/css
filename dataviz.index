@@ -257,7 +257,7 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
 #canvas { flex: 1; position: relative; overflow: hidden; background: var(--cream); }
 #chart-container { width: 100%; height: 100%; }
 #table-container { width: 100%; height: 100%; overflow: auto; display: none; }
-#table-container table { width: auto; min-width: 100%; border-collapse: collapse; font-size: 12px; table-layout: auto; }
+#table-container table { width: auto; min-width: 60%; max-width: 100%; margin: 0 auto; border-collapse: collapse; font-size: 12px; table-layout: auto; }
 #table-container th, #table-container td { width: auto; white-space: nowrap; }
 #table-container td.num, #table-container th.num-h { width: 1%; white-space: nowrap; text-align: right; }
 #table-container th:first-child, #table-container td:first-child { width: 1%; }
@@ -3136,7 +3136,7 @@ function renderTable(rawHeaders, rows) {
 
   function renderRow(row, extraCls='') {
     const gtCol = S.totals.grandCol ? fmtNum(rowTotal(row)) : null;
-    return `<tr class="${extraCls}">${headers.map(h => {
+    return `<tr class="${extraCls}">${dimHdrs.length === 0 && S.totals.grandRow ? '<td></td>' : ''}${headers.map(h => {
       const v = row[h], n = typeof v==='number';
       const tx = colTransforms[h];
       if (v === null) return `<td class="num"><span style="color:var(--faint)">—</span></td>`;
@@ -3150,7 +3150,7 @@ function renderTable(rawHeaders, rows) {
         return `<td class="num">${fmt}</td>`;
       }
       return `<td>${esc(String(v??''))}</td>`;
-    }).join('')}${gtCol !== null ? `<td class="num" style="font-weight:600;background:var(--cream);">${gtCol}</td>` : ''}</tr>`;
+    }).join('')}${gtCol !== null ? `<td class="num" style="font-weight:700;background:var(--forest-lt);color:var(--forest);border-bottom:1px solid var(--forest-mid);">${gtCol}</td>` : ''}</tr>`;
   }
 
   function renderTotalRow(label, rows, cls='grand-total-row') {
@@ -3159,6 +3159,7 @@ function renderTable(rawHeaders, rows) {
     return `<tr class="${cls}" style="font-weight:700;background:var(--forest-lt);border-top:2px solid var(--forest-mid);">
       <td style="color:var(--forest);">${label}</td>
       ${dimHdrs.slice(1).map(()=>'<td></td>').join('')}
+
       ${measHdrs.map(h => {
         const v = gt[h];
         if (v === null) return `<td class="num"><span style="color:var(--faint)">—</span></td>`;
@@ -3196,10 +3197,10 @@ function renderTable(rawHeaders, rows) {
 
   const grandTotalRow = S.totals.grandRow ? renderTotalRow('Grand Total', rowsForTotals) : '';
 
-  const gtColHeader   = S.totals.grandCol ? `<th class="num-h" style="text-align:right;color:var(--forest);font-weight:700;">Grand Total</th>` : '';
+  const gtColHeader = S.totals.grandCol ? `<th class="num-h" style="text-align:right;color:var(--forest);font-weight:700;text-transform:none;letter-spacing:0;background:var(--forest-lt);border-bottom:2px solid var(--forest-mid);">Grand Total</th>` : '';
 
   tc.innerHTML = `<table>
-    <thead><tr>${headers.map(h => {
+    <thead><tr>${dimHdrs.length === 0 && S.totals.grandRow ? '<th></th>' : ''}${headers.map(h => {
       const isSorted = sortState.col===h;
       const arrow = isSorted ? (sortState.dir===1?' ↑':' ↓') : '';
       const tx = colTransforms[h];
