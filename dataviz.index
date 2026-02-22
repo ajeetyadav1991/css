@@ -1873,6 +1873,7 @@ function clearDropIndicators() {
 
 function onDrop(e, shelf, targetIndex) {
   e.preventDefault();
+  e.stopPropagation();
   e.currentTarget.classList.remove('over-cols','over-rows','over-filt');
   clearDropIndicators();
 
@@ -1968,10 +1969,11 @@ function onDrop(e, shelf, targetIndex) {
     }
     S.shelf.filters.push(item);
     paintShelf('filters');
-    // Immediately fetch values and open popover
     fetchValuesAndOpen(dragF.field, dragF.type);
+    dragF = null;
     return;
   }
+  dragF = null;
   S.shelf[shelf].push(item);
   paintShelf(shelf);
   runQuery();
@@ -3194,7 +3196,7 @@ function renderTable(rawHeaders, rows) {
 
   const grandTotalRow = S.totals.grandRow ? renderTotalRow('Grand Total', rowsForTotals) : '';
 
-  const gtColHeader   = S.totals.grandCol ? `<th class="num-h" style="text-align:right;color:var(--forest);font-weight:700;">Total</th>` : '';
+  const gtColHeader   = S.totals.grandCol ? `<th class="num-h" style="text-align:right;color:var(--forest);font-weight:700;">Grand Total</th>` : '';
 
   tc.innerHTML = `<table>
     <thead><tr>${headers.map(h => {
