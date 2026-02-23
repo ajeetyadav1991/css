@@ -345,6 +345,35 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
 .sm-rl-btn.has-lines{border-color:var(--sky);color:var(--sky);background:var(--sky-lt);}
 #show-me-btn.active{background:var(--forest-lt);color:var(--forest);border-color:var(--forest-mid);}
 
+/* ── RESTORE BANNER ── */
+#restore-banner {
+  display: none;
+  background: var(--amber-lt);
+  border-bottom: 1.5px solid var(--amber-mid);
+  padding: 8px 18px;
+  font-size: 12px;
+  color: var(--amber);
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  z-index: 50;
+}
+#restore-banner.show { display: flex; }
+#restore-banner strong { font-weight: 600; }
+#restore-banner .rb-btn {
+  background: var(--amber); color: #fff; border: none;
+  border-radius: 4px; padding: 4px 12px; font-size: 11.5px;
+  font-weight: 600; cursor: pointer; font-family: var(--font);
+  white-space: nowrap; flex-shrink: 0;
+}
+#restore-banner .rb-btn:hover { background: #a34e00; }
+#restore-banner .rb-dismiss {
+  background: none; border: none; color: var(--amber);
+  cursor: pointer; font-size: 13px; margin-left: auto;
+  opacity: .6; padding: 0;
+}
+#restore-banner .rb-dismiss:hover { opacity: 1; }
+</style>
 
 </style>
 </head>
@@ -437,6 +466,13 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
   <button class="clear-btn" onclick="clearAll()" title="Clear shelves (Esc)">✕ Clear</button>
 </div>
 
+<div id="restore-banner">
+  <span>⏎</span>
+  <span>Last session: <strong id="rb-filename"></strong> — re-upload it to restore your view</span>
+  <button class="rb-btn" onclick="document.getElementById('file-input').click()">↑ Upload Again</button>
+  <button class="rb-btn" onclick="localStorage.removeItem('dvs_state');sessionStorage.removeItem('dvs_banner_dismissed');dismissRestoreBanner();document.getElementById('file-input').click()" style="background:var(--forest);">↑ Upload New File</button>
+  <button class="rb-dismiss" onclick="dismissRestoreBanner()" title="Dismiss">✕</button>
+</div>
 <div id="app">
   <div id="sidebar">
     <div class="sb-section" style="overflow:hidden;display:flex;flex-direction:column;flex:0 0 auto;max-height:50%;">
@@ -884,7 +920,7 @@ function _workerFn() {
           const ag = meas[m].agg;
           const c = cols[meas[m].field];
           const v = (meas[m].field==='Record Count') ? 1 : (c ? (parseFloat(c[i])||0) : 0);
-          e._a[m] = (ag==='COUNT'||ag==='COUNTD') ? 1 : v;
+          e._a[m] = (ag==='COUNT'||ag==='COUNTD') ? 1 : (ag==='LAST'||ag==='FIRST') ? (c ? c[i] : 0) : v;
         }
         gmap.set(key, e);
         // Init COUNTD sets for this new group
@@ -909,6 +945,8 @@ function _workerFn() {
           else if (ag === 'COUNTD') { sets[m].add(c ? c[i] : null); e._a[m] = sets[m].size; }
           else if (ag === 'MAX')    { e._a[m] = Math.max(e._a[m], v); }
           else if (ag === 'MIN')    { e._a[m] = Math.min(e._a[m], v); }
+          else if (ag === 'LAST')   { e._a[m] = v; }
+          else if (ag === 'FIRST')  { /* keep first value, already set on group init */ }
         }
       }
     }
@@ -918,7 +956,7 @@ function _workerFn() {
       for (let d=0;d<dLen;d++) row[dims[d].field]=e._d[d];
       for (let m=0;m<mLen;m++) {
         const k=meas[m].agg+'('+meas[m].field+')';
-        row[k]=meas[m].agg==='AVG'?e._a[m]/e._c[m]:e._a[m];
+        row[k]=meas[m].agg==='AVG' ? e._a[m]/e._c[m] : e._a[m];
       }
       // ── Stamp LOD values onto each row ──
       Object.keys(lodMaps).forEach(lodName => {
@@ -958,7 +996,7 @@ function _workerFn() {
     const limited = rows.slice(0, limit||50000);
     const lodHeaders = (lodFields||[]).map(l => l.name);
     const headers = [...dims.map(d=>d.field),...meas.map(m=>m.agg+'('+m.field+')'),...lodHeaders];
-    self.postMessage({ type:'RESULT', payload:{ headers, rows:limited, total:rows.length, skipped, _shelf: payload._shelf } });
+    self.postMessage({ type:'RESULT', payload:{ headers, rows:limited, total:rows.length, skipped, _shelf: payload._shelf, _qid: payload._qid } });
   }
 }
 
@@ -969,6 +1007,7 @@ const WW = _fnStr.slice(_fnStr.indexOf('{') + 1, _fnStr.lastIndexOf('}'));
 function _createWorker() {
   const w = new Worker(URL.createObjectURL(new Blob([WW], {type:'application/javascript'})));
   w.onerror = function(e) { hideProgress(); setStatus('⚠ Worker error: ' + e.message); };
+  w.onmessageerror = function() { hideProgress(); setStatus('⚠ Data engine error — try reloading'); };
   w.onmessage = _onWorkerMessage;
   return w;
 }
@@ -1043,6 +1082,7 @@ function _onWorkerMessage({ data: { type, payload } }) {
       S.schema.push({ name:'Record Count', type:'measure', defaultAgg:'COUNT', _virtual:true });
     }
     buildSidebar();
+    document.getElementById('restore-banner').classList.remove('show');
     setStatus(`${S.filename}  ·  ${fmtN(payload.rowCount)} rows  ·  ${payload.schema.length} columns`);
     const b = document.getElementById('row-badge');
     b.textContent = fmtN(payload.rowCount)+' rows'; b.style.display='';
@@ -1064,6 +1104,7 @@ function _onWorkerMessage({ data: { type, payload } }) {
   } else if (type === 'RAW_ROWS') {
     _renderPreviewModal(payload);
   } else if (type === 'RESULT') {
+    if (payload._qid && payload._qid !== _queryId) return; // stale result
     _queryActive = false;
     clearTimeout(_queryTimer);
     document.getElementById('query-overlay').style.display='none';
@@ -1098,6 +1139,11 @@ function paintAllShelves() {
 
 document.getElementById('file-input').addEventListener('change', function(e) {
   const f = e.target.files[0]; if (!f) return;
+  if (f.size > 600 * 1024 * 1024) {
+    setStatus('⚠ File too large — maximum 600 MB');
+    e.target.value = '';
+    return;
+  }
   S.filename = f.name;
   // Reset all state for new file — wipe filterState fully before schema changes
   S.shelf = { columns:[], rows:[], filters:[] };
@@ -1700,7 +1746,7 @@ function applyNumFormat(val, field) {
 
 
 document.addEventListener('click', closeCtxMenu);
-document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeCtxMenu(); });
+// document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeCtxMenu(); });
 
 function paintPills(listId, fields) {
   document.getElementById(listId).innerHTML = fields.map(f=>`
@@ -1732,6 +1778,7 @@ function startDrag(e,field,type) {
   const g=document.getElementById('drag-ghost'); g.textContent=field; g.style.display='block';
   e.dataTransfer.setDragImage(g,0,0);
 }
+
 function endDrag(e) {
   setTimeout(() => { _nativeDragFired = false; }, 0);
   dragF=null; chipDrag=null;
@@ -1739,6 +1786,15 @@ function endDrag(e) {
   document.getElementById('drag-ghost').style.display='none';
   clearDropIndicators();
 }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && (dragF || chipDrag)) {
+    dragF = null; chipDrag = null;
+    document.getElementById('drag-ghost').style.display = 'none';
+    document.querySelectorAll('.fp').forEach(p => p.classList.remove('dragging'));
+    clearDropIndicators();
+  }
+});
 
 // ── Mac trackpad pointer-drag fallback ──
 (function() {
@@ -1955,7 +2011,7 @@ function onDrop(e, shelf, targetIndex) {
     type: dragF.type,
     agg: dragF.type==='measure' ? (schemaEntry?.defaultAgg||'SUM') : null,
     discrete: schemaEntry?.discrete ?? (dragF.type === 'dimension' ? true : false),
-    _uid: Date.now() + Math.random()
+    _uid: `${Date.now()}_${Math.random().toString(36).slice(2,8)}`
   };
   
   if (shelf==='filters') {
@@ -1984,15 +2040,18 @@ function onDrop(e, shelf, targetIndex) {
 ════════════════════════════════════════════ */
 function fetchValuesAndOpen(field, type) {
   const reqId = ++reqCounter;
-  valueCallbacks[reqId] = (payload) => {
-    if (!filterState[field]) return;
-    if (type==='dimension') {
-      filterState[field].dataValues = payload.values; // [{v, c}]
-    } else {
-      filterState[field].stats = payload.stats;
-    }
-    paintShelf('filters');
-    openFilterPopover(field);
+  valueCallbacks[reqId] = {
+    cb: (payload) => {
+      if (!filterState[field]) return;
+      if (type==='dimension') {
+        filterState[field].dataValues = payload.values;
+      } else {
+        filterState[field].stats = payload.stats;
+      }
+      paintShelf('filters');
+      openFilterPopover(field);
+    },
+    timer: setTimeout(() => { delete valueCallbacks[reqId]; }, VALUE_CB_TIMEOUT_MS)
   };
   worker.postMessage({type:'GET_VALUES', payload:{field, type, reqId}});
 }
@@ -2065,7 +2124,8 @@ function paintShelf(name) {
     const agg = f.type==='measure'
       ? `<span class="chip-badge" onclick="openMeaPopup(event,'${name}',${i})" title="Click to configure">${badgeLabel} ▾</span>`
       : '';
-        const isDualChip = f.type==='measure' && dualAxisKeys.has(`${f.agg}(${f.field})`);
+        const isDualKey = f._uid ? `${f.agg}(${f.field})__${f._uid}` : `${f.agg}(${f.field})`;
+        const isDualChip = f.type==='measure' && dualAxisKeys.has(isDualKey);
         return `<div class="chip ${cls}" draggable="false"
           onmousedown="this.draggable=true"
           onmouseup="this.draggable=false"
@@ -2158,6 +2218,7 @@ function mpSetAgg(agg) {
     el.classList.toggle('active', el.textContent.trim() === agg);
   });
   updateMpPreview();
+  saveState();
 }
 
 function mpSetTx(tx) {
@@ -2175,6 +2236,7 @@ function mpSetTx(tx) {
   const maRow = document.getElementById('mp-ma-row');
   if (maRow) maRow.style.display = tx === 'ma' ? 'flex' : 'none';
   updateMpPreview();
+  saveState();
 }
 
 function mpSetMa(val) {
@@ -2183,6 +2245,7 @@ function mpSetMa(val) {
   const measKey = f._uid ? `${f.agg}(${f.field})__${f._uid}` : `${f.agg}(${f.field})`;
   setMaWindow(measKey, val);
   updateMpPreview();
+  saveState();
 }
 
 document.addEventListener('click', e => {
@@ -2218,14 +2281,21 @@ function fmtNum(n) {
 ════════════════════════════════════════════ */
 function changeAgg(sh,i,v) { S.shelf[sh][i].agg=v; runQuery(); }
 function removeChip(sh,i) {
+  if (_mpShelf === sh && _mpIndex === i) closeMeaPopup();
+  else if (_mpShelf === sh && _mpIndex > i) _mpIndex--;
   const f = S.shelf[sh][i];
   if (f && f.type==='measure') {
-    const key = `${f.agg}(${f.field})`;
-    delete colTransforms[key];
-    dualAxisKeys.delete(key);
+    const plainKey = `${f.agg}(${f.field})`;
+    const uidKey = f._uid ? `${f.agg}(${f.field})__${f._uid}` : null;
+    delete colTransforms[plainKey];
+    delete colMaWindow[plainKey];
+    if (uidKey) { delete colTransforms[uidKey]; delete colMaWindow[uidKey]; }
+    dualAxisKeys.delete(plainKey);
   }
   S.shelf[sh].splice(i,1);
-  paintShelf(sh); runQuery();
+  paintShelf(sh);
+  saveState();
+  runQuery();
 }
 function removeFilter(e,i) {
   e.stopPropagation();
@@ -2234,6 +2304,7 @@ function removeFilter(e,i) {
   S.shelf.filters.splice(i,1);
   if (openPopoverField===field) closePopover();
   paintShelf('filters'); runQuery();
+  saveState();
 }
 
 /* ════════════════════════════════════════════
@@ -2282,6 +2353,8 @@ function openFilterPopover(field) {
 function closePopover() {
   document.getElementById('filter-popover').classList.remove('show');
   openPopoverField=null;
+  // Clean up registry entries to prevent memory leak
+  Object.keys(_reg).forEach(k => { if (_reg[k] && _reg[k].field) _regDel(k); });
   paintShelf('filters');
 }
 
@@ -2673,7 +2746,7 @@ function openChipCtxMenu(e, shelf, index) {
   html += `<div class="ctx-sep"></div>`;
 
   if (f.type === 'measure') {
-    const measKey = `${f.agg}(${f.field})`;
+    const measKey = f._uid ? `${f.agg}(${f.field})__${f._uid}` : `${f.agg}(${f.field})`;
     const isDual  = dualAxisKeys.has(measKey);
     html += `<div class="ctx-item" onclick="toggleDualAxis('${esc(measKey)}');closeCtxMenu()">
       <span>${isDual ? '✓ ' : ''}Dual Axis (right Y)</span>
@@ -2716,11 +2789,10 @@ function setMaWindow(measKey, val) {
 
 function applyTransforms(headers, rows) {
   if (!rows.length) return rows;
-  // structuredClone would be ideal but spread is sufficient for flat row objects
-  // JSON round-trip ensures no shared references regardless of value type
-  const out = rows.map(r => Object.assign(Object.create(null), r));
   const measHeaders = headers.filter(h=>h.includes('('));
-
+  const hasAnyTx = measHeaders.some(h => colTransforms[h]);
+  if (!hasAnyTx) return rows;
+  const out = rows.map(r => Object.assign({}, r));
   measHeaders.forEach(h => {
     const tx = colTransforms[h];
     if (!tx) return;
@@ -2731,15 +2803,13 @@ function applyTransforms(headers, rows) {
       out.forEach((r,i) => r[h] = total ? +((vals[i]/total*100).toFixed(2)) : 0);
     }
     else if (tx === 'pct_row') {
-      // % of row total across all measures — exclude plain keys that have uid versions
       const expandedPlains = new Set(
         measHeaders.filter(mh => mh.includes('__'))
                    .map(mh => mh.replace(/__[\d.]+$/, ''))
       );
+      const rowHeaders = measHeaders.filter(mh => !expandedPlains.has(mh));
       out.forEach((r,i) => {
-        const rowTotal = measHeaders
-          .filter(mh => !expandedPlains.has(mh))
-          .reduce((s,mh) => (+r[mh]||0)+s, 0);
+        const rowTotal = rowHeaders.reduce((s,mh) => (+r[mh]||0)+s, 0);
         r[h] = rowTotal ? +((vals[i]/rowTotal*100).toFixed(2)) : 0;
       });
     }
@@ -2749,7 +2819,9 @@ function applyTransforms(headers, rows) {
     }
     else if (tx === 'rank') {
       const sorted = [...vals].sort((a,b)=>b-a);
-      out.forEach((r,i) => { r[h] = sorted.indexOf(vals[i])+1; });
+      const rankMap = new Map();
+      sorted.forEach((v,i) => { if (!rankMap.has(v)) rankMap.set(v, i+1); });
+      out.forEach((r,i) => { r[h] = rankMap.get(vals[i]) ?? i+1; });
     }
     else if (tx === 'diff') {
       // val[i] - val[i-1], first row gets null
@@ -2782,6 +2854,7 @@ function applyTransforms(headers, rows) {
 ════════════════════════════════════════════ */
 let _queryTimer = null;
 let _queryActive = false;
+let _queryId = 0;
 let _previewMode = false;
 let _previewShelfBackup = null;
 let _previewRowCount = 100;
@@ -2797,9 +2870,15 @@ function cancelQuery() {
   worker = _createWorker();
 }
 
+let _saveTimer = null;
+
 function saveState() {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
   try {
     const state = {
+      _version: 1,
+      filename: S.filename,
       shelf: S.shelf,
       params: S.params,
       lodFields: S.lodFields,
@@ -2811,35 +2890,70 @@ function saveState() {
       transforms: colTransforms,
       maWindows: colMaWindow,
       dualAxis: [...dualAxisKeys],
-      filterState
+      filterState,
+      sortState
     };
-    window.storage.set('dvs_state', JSON.stringify(state));
+    const _json = JSON.stringify(state);
+    if (_json.length > 4 * 1024 * 1024) {
+      localStorage.setItem('dvs_state', JSON.stringify({...state, filterState:{}}));
+    } else {
+      localStorage.setItem('dvs_state', _json);
+    }
   } catch(e) {}
+  }, 800);
+}
+
+function checkRestoreBanner() {
+  try {
+    const raw = localStorage.getItem('dvs_state');
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    const hasShelf = s.shelf && ([...s.shelf.columns||[],...s.shelf.rows||[],...s.shelf.filters||[]].length > 0);
+    if (s.filename && hasShelf) {
+      if (sessionStorage.getItem('dvs_banner_dismissed')) return;
+      const fieldCount = [...s.shelf.columns||[],...s.shelf.rows||[]].length;
+      document.getElementById('rb-filename').textContent = `${s.filename} · ${fieldCount} field${fieldCount!==1?'s':''} configured`;
+      document.getElementById('restore-banner').classList.add('show');
+    }
+  } catch(e) {}
+}
+
+function dismissRestoreBanner() {
+  document.getElementById('restore-banner').classList.remove('show');
+  sessionStorage.setItem('dvs_banner_dismissed', '1');
+
 }
 
 function restoreState() {
   try {
-    window.storage.get('dvs_state').then(res => {
-      if (!res) { runQuery(); return; }
-      const s = JSON.parse(res.value);
-      S.shelf       = s.shelf       || {columns:[],rows:[],filters:[]};
-      S.params      = s.params      || [];
-      S.lodFields   = s.lodFields   || [];
-      S.hierarchies = s.hierarchies || {};
-      S.refLines    = s.refLines    || [];
-      S.chartType   = s.chartType   || 'bar';
-      S.view        = s.view        || 'table';
-      S.totals      = s.totals      || {grandRow:false,grandCol:false,subtotals:false};
-      Object.assign(colTransforms, s.transforms || {});
-      Object.assign(colMaWindow,   s.maWindows  || {});
-      (s.dualAxis||[]).forEach(k => dualAxisKeys.add(k));
-      Object.assign(filterState, s.filterState || {});
-      paintAllShelves();
-      paintParams();
-      paintDrillBar();
-      runQuery();
-    });
-  } catch(e) {}
+    const raw = localStorage.getItem('dvs_state');
+    if (!raw) { runQuery(); return; }
+    const s = JSON.parse(raw);
+    if (!s._version || s._version < 1) {
+      localStorage.removeItem('dvs_state');
+      runQuery(); return;
+    }
+    S.shelf       = s.shelf       || {columns:[],rows:[],filters:[]};
+    S.params      = s.params      || [];
+    S.lodFields   = s.lodFields   || [];
+    S.hierarchies = s.hierarchies || {};
+    S.refLines    = s.refLines    || [];
+    S.chartType   = s.chartType   || 'bar';
+    S.view        = s.view        || 'table';
+    S.totals      = s.totals      || {grandRow:false,grandCol:false,subtotals:false};
+    Object.assign(colTransforms, s.transforms || {});
+    Object.assign(colMaWindow,   s.maWindows  || {});
+    (s.dualAxis||[]).forEach(k => dualAxisKeys.add(k));
+    Object.assign(filterState, s.filterState || {});
+    if (s.sortState) sortState = s.sortState;
+    paintAllShelves();
+    paintParams();
+    paintDrillBar();
+    runQuery();
+  } catch(e) {
+    localStorage.removeItem('dvs_state');
+    runQuery();
+  }
 }
 
 function runQuery() {
@@ -2847,6 +2961,9 @@ function runQuery() {
   const allF=[...S.shelf.columns,...S.shelf.rows];
   const dims=allF.filter(f=>f.type==='dimension');
   const meas=allF.filter(f=>f.type==='measure');
+  const newShelfSig = allF.map(f=>f.field+f.agg).join(',');
+  if (newShelfSig !== _lastShelfSig) { sortState = { col: null, dir: 1 }; }
+  _lastShelfSig = newShelfSig;
   const filters=S.shelf.filters.map(f=>{
     const fs=filterState[f.field]||{};
     return { field:f.field, type:f.type, selectedValues:fs.selectedValues||[], minVal:fs.minVal||'', maxVal:fs.maxVal||'',
@@ -2883,7 +3000,8 @@ function runQuery() {
     rowDiscretes: S.shelf.rows.map(f => f.discrete ?? (f.type==='dimension'))
   };
   saveState();
-  worker.postMessage({type:'QUERY',payload:{dims,meas,filters,limit: _previewMode ? _previewRowCount : 50000,lodFields:S.lodFields, _shelf:_shelfSnapshot}});
+  const _qid = ++_queryId;
+  worker.postMessage({type:'QUERY',payload:{dims,meas,filters,limit: _previewMode ? _previewRowCount : 50000,lodFields:S.lodFields, _shelf:_shelfSnapshot, _qid}});
 }
 
 /* ════════════════════════════════════════════
@@ -3060,6 +3178,7 @@ function renderChart(headers, rows) {
 }
 
 let sortState = { col: null, dir: 1 };
+let _lastShelfSig = '';
 const colTransforms = {}; // key: `AGG(field)` → 'pct' | 'running' | null
 const colMaWindow   = {}; // key: `AGG(field)` → window size (integer, default 3)
 const dualAxisKeys  = new Set(); // measKeys on right Y axis
@@ -3150,7 +3269,7 @@ function renderTable(rawHeaders, rows) {
         return `<td class="num">${fmt}</td>`;
       }
       return `<td>${esc(String(v??''))}</td>`;
-    }).join('')}${gtCol !== null ? `<td class="num" style="font-weight:700;background:var(--forest-lt);color:var(--forest);border-bottom:1px solid var(--forest-mid);">${gtCol}</td>` : ''}</tr>`;
+    }).join('')}${gtCol !== null ? `<td class="num" style="font-weight:700;background:var(--forest-lt);color:var(--forest);border-bottom:1px solid var(--forest-mid);border-left:2px solid var(--forest-mid);">${gtCol}</td>` : ''}</tr>`;
   }
 
   function renderTotalRow(label, rows, cls='grand-total-row') {
@@ -3197,7 +3316,7 @@ function renderTable(rawHeaders, rows) {
 
   const grandTotalRow = S.totals.grandRow ? renderTotalRow('Grand Total', rowsForTotals) : '';
 
-  const gtColHeader = S.totals.grandCol ? `<th class="num-h" style="text-align:right;color:var(--forest);font-weight:700;text-transform:none;letter-spacing:0;background:var(--forest-lt);border-bottom:2px solid var(--forest-mid);">Grand Total</th>` : '';
+  const gtColHeader = S.totals.grandCol ? `<th class="num-h" style="text-align:right;color:var(--forest);font-weight:700;font-size:12px;text-transform:none;letter-spacing:0;background:var(--forest-lt);border-bottom:2px solid var(--forest-mid);border-left:2px solid var(--forest-mid);">Grand Total</th>` : '';
 
   tc.innerHTML = `<table>
     <thead><tr>${dimHdrs.length === 0 && S.totals.grandRow ? '<th></th>' : ''}${headers.map(h => {
@@ -3567,6 +3686,7 @@ function paintLodList() {
 }
 
 function clearAll() {
+  if (S.schema.length && !window.confirm('Clear all shelves and transforms?')) return;
   // Cancel any in-flight query first — must happen before anything else
   _queryActive = false;
   clearTimeout(_queryTimer);
@@ -3601,8 +3721,9 @@ function clearAll() {
   if (chart) {
     chart.off('click', _onChartClick);
     chart.clear();
-    chart = null; // force re-init so handler re-registers cleanly on next render
+    chart = null;
   }
+  localStorage.removeItem('dvs_state');
 }
 
 function showPreview() {
@@ -3835,7 +3956,7 @@ function showCardinalityWarning(field, type, shelf, uniqueCount) {
 
 function proceedDrop(field, type, shelf) {
   const schemaEntry = S.schema.find(x=>x.name===field);
-  const uid = Date.now()+Math.random();
+  const uid = `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
   const item = {field, type, agg: type==='measure'?(schemaEntry?.defaultAgg||'SUM'):null, _uid: uid};
   
   // NEW: migrate any existing transform from plain key to uid key
@@ -4504,6 +4625,9 @@ async function onedriveImport() {
 function showProgress(title,pct,sub) { document.getElementById('progress-overlay').classList.add('show'); document.getElementById('progress-title').textContent=title; document.getElementById('progress-sub').textContent=sub; document.getElementById('prog-fill').style.width=pct+'%'; document.getElementById('prog-pct').textContent=pct+'%'; }
 function setProgress(pct,sub) { document.getElementById('prog-fill').style.width=pct+'%'; document.getElementById('prog-pct').textContent=pct+'%'; document.getElementById('progress-sub').textContent=sub; }
 function hideProgress() { document.getElementById('progress-overlay').classList.remove('show'); }
+
+document.addEventListener('DOMContentLoaded', checkRestoreBanner); 
+
 function setStatus(msg) {
   document.getElementById('status-bar').textContent = msg;
   const badge = document.getElementById('skip-badge');
@@ -4528,8 +4652,16 @@ document.addEventListener('click', e => {
   const pop=document.getElementById('filter-popover');
   if (!pop.contains(e.target) && !e.target.closest('.fchip')) closePopover();
 });
+
 document.addEventListener('keydown', e => {
-  if (e.key==='Escape') { if(openPopoverField) { closePopover(); } closeAnalysisMenu(); closeMeaPopup(); }
+  if (e.key === 'Escape') {
+    closePopover();
+    closeAnalysisMenu();
+    closeMeaPopup();
+    closeCtxMenu();
+    document.getElementById('stat-modal').style.display = 'none';
+    document.getElementById('corr-modal').style.display = 'none';
+  }
 });
 
 /* ════════════════════════════════════════════
