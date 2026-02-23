@@ -2933,7 +2933,13 @@ function restoreState() {
       localStorage.removeItem('dvs_state');
       runQuery(); return;
     }
-    S.shelf       = s.shelf       || {columns:[],rows:[],filters:[]};
+    const validFields = new Set(S.schema.map(f => f.name));
+    const filterShelf = (arr) => (arr||[]).filter(f => validFields.has(f.field));
+    S.shelf = {
+      columns: filterShelf(s.shelf?.columns),
+      rows:    filterShelf(s.shelf?.rows),
+      filters: filterShelf(s.shelf?.filters)
+    };
     S.params      = s.params      || [];
     S.lodFields   = s.lodFields   || [];
     S.hierarchies = s.hierarchies || {};
