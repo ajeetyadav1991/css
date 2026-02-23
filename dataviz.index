@@ -345,6 +345,35 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
 .sm-rl-btn.has-lines{border-color:var(--sky);color:var(--sky);background:var(--sky-lt);}
 #show-me-btn.active{background:var(--forest-lt);color:var(--forest);border-color:var(--forest-mid);}
 
+/* ── DVS ANALYSIS BANNER ── */
+#dvs-banner {
+  display: none;
+  background: var(--sky-lt);
+  border-bottom: 1.5px solid #bfd4f0;
+  padding: 8px 18px;
+  font-size: 12px;
+  color: var(--sky);
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  z-index: 50;
+}
+#dvs-banner.show { display: flex; }
+#dvs-banner strong { font-weight: 600; color: var(--ink); }
+#dvs-banner .rb-btn {
+  background: var(--sky); color: #fff; border: none;
+  border-radius: 4px; padding: 4px 12px; font-size: 11.5px;
+  font-weight: 600; cursor: pointer; font-family: var(--font);
+  white-space: nowrap; flex-shrink: 0;
+}
+#dvs-banner .rb-btn:hover { background: #003d8a; }
+#dvs-banner .rb-dismiss {
+  background: none; border: none; color: var(--sky);
+  cursor: pointer; font-size: 13px; margin-left: auto;
+  opacity: .6; padding: 0;
+}
+#dvs-banner .rb-dismiss:hover { opacity: 1; }
+
 /* ── RESTORE BANNER ── */
 #restore-banner {
   display: none;
@@ -463,8 +492,11 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
       </div>
     </div>
   </div>
+  <button class="clear-btn" id="save-analysis-btn" onclick="exportAnalysis()" style="display:none;" title="Save analysis as .dvs file">⬇ Save Analysis</button>
   <button class="clear-btn" onclick="clearAll()" title="Clear shelves (Esc)">✕ Clear</button>
+  <button class="clear-btn" onclick="document.getElementById('dvs-input').click()" title="Open a saved .dvs analysis file">📂 Open Analysis</button>
 </div>
+<input type="file" id="dvs-input" accept=".dvs" style="display:none">
 
 <div id="restore-banner">
   <span>⏎</span>
@@ -472,6 +504,12 @@ html, body { height: 100%; overflow: hidden; font-family: var(--font); backgroun
   <button class="rb-btn" onclick="document.getElementById('file-input').click()">↑ Upload Again</button>
   <button class="rb-btn" onclick="localStorage.removeItem('dvs_state');sessionStorage.removeItem('dvs_banner_dismissed');dismissRestoreBanner();document.getElementById('file-input').click()" style="background:var(--forest);">↑ Upload New File</button>
   <button class="rb-dismiss" onclick="dismissRestoreBanner()" title="Dismiss">✕</button>
+</div>
+<div id="dvs-banner">
+  <span>📊</span>
+  <span id="dvs-banner-msg">Viewing shared analysis</span>
+  <button class="rb-btn" onclick="document.getElementById('file-input').click()">↑ Upload Original File</button>
+  <button class="rb-dismiss" onclick="document.getElementById('dvs-banner').classList.remove('show')" title="Dismiss">✕</button>
 </div>
 <div id="app">
   <div id="sidebar">
@@ -1019,6 +1057,7 @@ let worker = _createWorker();
 
 const S = {
   schema: [], rowCount: 0, filename: '', skipped: [],
+  _dvsMode: false, _dvsOriginalFilename: '',
   shelf: { columns:[], rows:[], filters:[] },
   chartType: 'bar', view: 'table', result: null,
   hierarchies: {},
@@ -1144,6 +1183,16 @@ document.getElementById('file-input').addEventListener('change', function(e) {
     e.target.value = '';
     return;
   }
+  // Wrong file check — if in DVS aggregated mode, warn if filename doesn't match
+  if (S._dvsMode && S._dvsOriginalFilename && f.name !== S._dvsOriginalFilename) {
+    const proceed = confirm(
+      `⚠ Wrong file detected.\n\nThis analysis was created from "${S._dvsOriginalFilename}".\n\nYou selected "${f.name}".\n\nUpload anyway? The view may not restore correctly.`
+    );
+    if (!proceed) { e.target.value = ''; return; }
+  }
+  S._dvsMode = false;
+  S._dvsOriginalFilename = '';
+  document.getElementById('dvs-banner').classList.remove('show');
   S.filename = f.name;
   // Reset all state for new file — wipe filterState fully before schema changes
   S.shelf = { columns:[], rows:[], filters:[] };
@@ -1180,9 +1229,15 @@ document.getElementById('file-input').addEventListener('change', function(e) {
 
 function readCSV(file) {
   showProgress('Reading CSV…', 5, 'Loading file into memory…');
+  S._rawCSVSize = file.size;
   const rd = new FileReader();
   rd.onprogress = e => { if (e.lengthComputable) setProgress(Math.round((e.loaded/e.total)*12),'Reading…'); };
-  rd.onload = e => { setProgress(15,'Parsing rows…'); worker.postMessage({type:'PARSE_CSV',payload:e.target.result}); };
+  rd.onload = e => {
+    if (file.size < DVS_SIZE_THRESHOLD) S._rawCSV = e.target.result;
+    else S._rawCSV = null;
+    setProgress(15,'Parsing rows…');
+    worker.postMessage({type:'PARSE_CSV',payload:e.target.result});
+  };
   rd.readAsText(file);
 }
 
@@ -3885,6 +3940,144 @@ document.addEventListener('click', e => {
   const panel = document.getElementById('show-me-panel');
   const btn = document.getElementById('show-me-btn');
   if (panel && btn && !panel.contains(e.target) && !btn.contains(e.target)) closeShowMe();
+});
+
+/* ════════════════════════════════════════════
+   EXPORT / OPEN ANALYSIS (.dvs)
+════════════════════════════════════════════ */
+const DVS_SIZE_THRESHOLD = 10 * 1024 * 1024; // 10MB
+
+function exportAnalysis() {
+  if (!S.result || !S.result.rows.length) {
+    setStatus('⚠ Build a view first before saving analysis'); return;
+  }
+  const state = {
+    _version: 1,
+    filename: S.filename,
+    shelf: S.shelf,
+    params: S.params,
+    lodFields: S.lodFields,
+    hierarchies: S.hierarchies,
+    refLines: S.refLines,
+    chartType: S.chartType,
+    view: S.view,
+    totals: S.totals,
+    transforms: colTransforms,
+    maWindows: colMaWindow,
+    dualAxis: [...dualAxisKeys],
+    filterState,
+    sortState
+  };
+
+  // Decide embed type based on original file size
+  const useFullEmbed = S._rawCSVSize && S._rawCSVSize < DVS_SIZE_THRESHOLD;
+
+  let pkg;
+  if (useFullEmbed && S._rawCSV) {
+    pkg = { _dvs: true, _version: 1, embedType: 'full', filename: S.filename, csvData: S._rawCSV, state };
+    setStatus('Saving full analysis (data embedded)…');
+  } else {
+    // Embed aggregated result only
+    const rows = applyTransforms(S.result.headers, S.result.rows);
+    pkg = { _dvs: true, _version: 1, embedType: 'aggregated', filename: S.filename,
+            resultHeaders: S.result.headers, resultRows: rows,
+            resultTotal: S.result.total, _shelf: S.result._shelf, state };
+    setStatus('Saving analysis (aggregated view embedded)…');
+  }
+
+  const json = JSON.stringify(pkg);
+  const blob = new Blob([json], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = S.filename.replace(/\.[^.]+$/, '') + '_analysis.dvs';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  setStatus(`Analysis saved: ${a.download}`);
+}
+
+function openAnalysisFile(file) {
+  if (!file) return;
+  const rd = new FileReader();
+  rd.onload = e => {
+    let pkg;
+    try { pkg = JSON.parse(e.target.result); } catch(err) {
+      alert('⚠ Invalid file — this does not appear to be a valid .dvs analysis file.'); return;
+    }
+    if (!pkg._dvs || !pkg._version) {
+      alert('⚠ Invalid file — this does not appear to be a valid .dvs analysis file.'); return;
+    }
+
+    // Restore state into S
+    const s = pkg.state;
+    S.filename          = pkg.filename;
+    S._dvsOriginalFilename = pkg.filename;
+    S.params            = s.params      || [];
+    S.lodFields         = s.lodFields   || [];
+    S.hierarchies       = s.hierarchies || {};
+    S.refLines          = s.refLines    || [];
+    S.chartType         = s.chartType   || 'bar';
+    S.view              = s.view        || 'table';
+    S.totals            = s.totals      || { grandRow:false, grandCol:false, subtotals:false };
+    Object.keys(colTransforms).forEach(k => delete colTransforms[k]);
+    Object.keys(colMaWindow).forEach(k => delete colMaWindow[k]);
+    dualAxisKeys.clear();
+    Object.assign(colTransforms, s.transforms || {});
+    Object.assign(colMaWindow,   s.maWindows  || {});
+    (s.dualAxis||[]).forEach(k => dualAxisKeys.add(k));
+    Object.assign(filterState,   s.filterState || {});
+
+    if (pkg.embedType === 'full') {
+      // Re-parse full CSV through worker — full explore mode
+      S._dvsMode = false;
+      const blob = new Blob([pkg.csvData], { type: 'text/csv' });
+      const fakeFile = new File([blob], pkg.filename, { type: 'text/csv' });
+      // Validate fields after parse via restoreState
+      S.shelf = s.shelf || { columns:[], rows:[], filters:[] };
+      readCSV(fakeFile);
+      setStatus(`Opening full analysis: ${pkg.filename}…`);
+    } else {
+      // Aggregated mode — load result directly, no worker needed
+      S._dvsMode = true;
+      S.schema = (pkg.resultHeaders||[]).map(h => ({
+        name: h,
+        type: h.includes('(') ? 'measure' : 'dimension',
+        _virtual: true
+      }));
+      S.rowCount  = pkg.resultTotal || pkg.resultRows.length;
+      S.result    = { headers: pkg.resultHeaders, rows: pkg.resultRows,
+                      total: pkg.resultTotal, _shelf: pkg._shelf };
+      const validFields = new Set(S.schema.map(f => f.name));
+      const filterShelf = arr => (arr||[]).filter(f => validFields.has(f.field));
+      S.shelf = {
+        columns: filterShelf(s.shelf?.columns),
+        rows:    filterShelf(s.shelf?.rows),
+        filters: filterShelf(s.shelf?.filters)
+      };
+      buildSidebar();
+      paintAllShelves();
+      paintParams();
+      paintDrillBar();
+      render();
+      // Show DVS banner with original filename
+      document.getElementById('dvs-banner-msg').innerHTML =
+        `Viewing shared analysis — to explore further, upload the original file: <strong>${esc(pkg.filename)}</strong>`;
+      document.getElementById('dvs-banner').classList.add('show');
+      document.getElementById('row-badge').style.display = '';
+      document.getElementById('row-badge').textContent = fmtN(S.rowCount) + ' rows';
+      document.getElementById('analysis-btn').style.display = '';
+      document.getElementById('save-analysis-btn').style.display = '';
+      document.getElementById('save-analysis-btn').style.display = '';
+      setStatus(`${pkg.filename}  ·  Shared analysis (aggregated view)`);
+    }
+  };
+  rd.readAsText(file);
+}
+
+// Wire up dvs-input file picker
+document.getElementById('dvs-input').addEventListener('change', function(e) {
+  const f = e.target.files[0]; if (!f) return;
+  openAnalysisFile(f);
+  e.target.value = '';
 });
 
 function exportCSV() {
